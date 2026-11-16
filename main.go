@@ -77,6 +77,7 @@ type App struct {
 	authMu                                              sync.Mutex
 	loginGate                                           chan struct{}
 	failures                                            map[string]loginFailure
+	updater                                             *updater
 }
 
 // Минимальный protobuf-декодер читает только документированные поля StatsService.
@@ -525,6 +526,21 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		a.logout(w, r)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/api/update") {
+		a.updateHandler(w, r)
+		return
+	}
+	if r.Method == "GET" && r.URL.Path == "/healthz" {
+		a.mu.Lock()
+		ready := a.lastOK > 0
+		a.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if !ready {
+			w.WriteHeader(503)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"version": version, "ready": ready})
+		return
+	}
 	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", 405)
 		return
@@ -563,7 +579,28 @@ func main() {
 	flag.StringVar(&a.apiAddress, "api", "127.0.0.1:10085", "Xray StatsService")
 	setPassword := flag.Bool("set-password", false, "Read a new password from stdin; run with the service stopped")
 	checkAuth := flag.Bool("check-auth", false, "Validate the private authentication file and exit")
+	showVersion := flag.Bool("version", false, "Print version and exit")
+	checkInstall := flag.Bool("check-install", false, "Check compatibility with current configuration and data")
+	updateDir := flag.String("update-dir", "/opt/var/lib/xkeen-stats/update", "Private update directory")
+	applyJob := flag.String("apply-update", "", "Internal update worker")
+	recoverJob := flag.Bool("recover-update", false, "Recover an interrupted binary update")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
+	if *applyJob != "" {
+		if err := applyUpdate(*applyJob); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *recoverJob {
+		if err := recoverUpdate(*updateDir); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if *setPassword {
 		if err := setPasswordFromInput(a.authPath, os.Stdin); err != nil {
 			log.Fatal(err)
@@ -583,6 +620,13 @@ func main() {
 	if err := a.load(); err != nil {
 		log.Fatal(err)
 	}
+	if *checkInstall {
+		if _, err := a.rows(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	a.updater = &updater{app: a, dir: *updateDir, client: newUpdateClient()}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	go func() {

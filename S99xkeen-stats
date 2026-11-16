@@ -11,6 +11,9 @@ export GOGC=100
 umask 077
 case "$1" in
   start|restart|reconfigure)
+    if test -x /opt/var/lib/xkeen-stats/update/updater; then
+      /opt/var/lib/xkeen-stats/update/updater -recover-update || exit 1
+    fi
     /opt/etc/ndm/netfilter.d/051-xkeen-stats-lan.sh || exit 1
     /opt/sbin/xkeen-stats -check-auth >/dev/null 2>&1 || exit 1
     ;;
