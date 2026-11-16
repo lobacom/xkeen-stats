@@ -52,16 +52,17 @@ type Live struct {
 }
 
 type Row struct {
-	Key        string   `json:"key"`
-	Name       string   `json:"name"`
-	Kind       string   `json:"kind"`
-	Routes     []string `json:"routes"`
-	Configured bool     `json:"configured"`
-	Total      Traffic  `json:"total"`
-	Today      Traffic  `json:"today"`
-	Month      Traffic  `json:"month"`
-	LastSeen   int64    `json:"last_seen"`
-	Live       Live     `json:"live"`
+	Key        string       `json:"key"`
+	Name       string       `json:"name"`
+	Kind       string       `json:"kind"`
+	Routes     []string     `json:"routes"`
+	Configured bool         `json:"configured"`
+	Total      Traffic      `json:"total"`
+	Today      Traffic      `json:"today"`
+	Month      Traffic      `json:"month"`
+	LastSeen   int64        `json:"last_seen"`
+	Live       Live         `json:"live"`
+	Channel    *channelInfo `json:"channel,omitempty"`
 }
 
 type App struct {
@@ -72,6 +73,7 @@ type App struct {
 	lastOK                                              int64
 	lastError                                           string
 	saveError                                           string
+	labelsError                                         string
 	configPath, authPath, statePath, apiAddress, listen string
 	rpc                                                 *http.Client
 	authMu                                              sync.Mutex
@@ -442,17 +444,8 @@ func (a *App) load() error {
 
 func (a *App) rows() ([]Row, error) {
 	var config struct {
-		Inbounds []struct {
-			Tag      string `json:"tag"`
-			Settings struct {
-				Clients []struct {
-					Email string `json:"email"`
-				} `json:"clients"`
-			} `json:"settings"`
-		} `json:"inbounds"`
-		Outbounds []struct {
-			Tag string `json:"tag"`
-		} `json:"outbounds"`
+		Inbounds  []channelConfig `json:"inbounds"`
+		Outbounds []channelConfig `json:"outbounds"`
 	}
 	b, err := os.ReadFile(a.configPath)
 	if err != nil {
@@ -462,8 +455,15 @@ func (a *App) rows() ([]Row, error) {
 		return nil, err
 	}
 	names := map[string][]string{}
+	descriptions := map[string]channelInfo{}
+	labels, labelsErr := readChannelLabels(a.authPath)
+	a.labelsError = ""
+	if labelsErr != nil {
+		a.labelsError = "Не удалось прочитать labels.json. Показаны автоматические пояснения каналов."
+	}
 	for _, i := range config.Inbounds {
 		names["inbound:"+i.Tag] = nil
+		descriptions["inbound:"+i.Tag] = applyChannelLabel(describeChannel("inbound", i), labels["inbound:"+i.Tag])
 		for _, c := range i.Settings.Clients {
 			if c.Email != "" {
 				key := "user:" + c.Email
@@ -473,6 +473,7 @@ func (a *App) rows() ([]Row, error) {
 	}
 	for _, o := range config.Outbounds {
 		names["outbound:"+o.Tag] = nil
+		descriptions["outbound:"+o.Tag] = applyChannelLabel(describeChannel("outbound", o), labels["outbound:"+o.Tag])
 	}
 	for key := range a.state.Entries {
 		if _, ok := names[key]; !ok {
@@ -497,7 +498,11 @@ func (a *App) rows() ([]Row, error) {
 			}
 		}
 		sort.Strings(routes)
-		rows = append(rows, Row{Key: key, Name: name, Kind: kind, Routes: routes, Configured: kind != "user" || len(routes) > 0, Total: e.Total, Today: e.Daily[today], Month: m, LastSeen: e.LastSeen, Live: a.live[key]})
+		row := Row{Key: key, Name: name, Kind: kind, Routes: routes, Configured: kind != "user" || len(routes) > 0, Total: e.Total, Today: e.Daily[today], Month: m, LastSeen: e.LastSeen, Live: a.live[key]}
+		if info, ok := descriptions[key]; ok {
+			row.Channel = &info
+		}
+		rows = append(rows, row)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Key < rows[j].Key })
 	return rows, nil
@@ -577,7 +582,7 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Не удалось прочитать список профилей"}`, 503)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"rows": rows, "since": a.state.Since, "updated": a.lastOK, "saved": a.state.Saved, "error": a.lastError, "save_error": a.saveError, "now": time.Now().Unix(), "interval": 5})
+	_ = json.NewEncoder(w).Encode(map[string]any{"rows": rows, "since": a.state.Since, "updated": a.lastOK, "saved": a.state.Saved, "error": a.lastError, "save_error": a.saveError, "labels_error": a.labelsError, "now": time.Now().Unix(), "interval": 5})
 }
 
 func main() {

@@ -17,6 +17,7 @@ keenetic.txt
 state*.json
 auth*.json
 setup-token
+labels.json
 setup*.json
 *.log
 
