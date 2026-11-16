@@ -26,9 +26,9 @@ var initScript []byte
 var firewallScript []byte
 
 type installOptions struct {
-	PlanOnly, AllowRestart, EnableProbes bool
-	Interface, Init, Xray, Source        string
-	Explicit                             map[string]bool
+	PlanOnly, AllowRestart        bool
+	Interface, Init, Xray, Source string
+	Explicit                      map[string]bool
 }
 
 type installPlan struct {
@@ -432,11 +432,6 @@ func makeInstallPlan(a *App, o installOptions) (installPlan, error) {
 	next, api, err := statsSettings(c, a.apiAddress)
 	if err != nil {
 		return p, err
-	}
-	if o.EnableProbes {
-		if err := enableExitProbes(next); err != nil {
-			return p, err
-		}
 	}
 	network.API = api
 	p.Service = network

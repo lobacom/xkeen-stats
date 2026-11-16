@@ -2,25 +2,9 @@ package main
 
 import (
 	"encoding/binary"
-	"reflect"
+	"net"
 	"testing"
 )
-
-func TestObservatoryEnablePreservesVPNAndExistingMonitor(t *testing.T) {
-	c := jsonObject{"api": jsonObject{"services": []any{"StatsService"}}, "outbounds": []any{jsonObject{"tag": "direct", "protocol": "freedom"}, jsonObject{"tag": "vpn", "protocol": "vless"}, jsonObject{"tag": "chain", "protocol": "freedom", "proxySettings": jsonObject{"tag": "vpn"}}}}
-	before := cloneObject(c)["outbounds"]
-	if err := enableExitProbes(c); err != nil {
-		t.Fatal(err)
-	}
-	obs := object(c["observatory"])
-	if len(array(obs["subjectSelector"])) != 2 || !reflect.DeepEqual(before, c["outbounds"]) {
-		t.Fatal("VPN config changed")
-	}
-	obs["probeInterval"] = "2m"
-	if err := enableExitProbes(c); err != nil || object(c["observatory"])["probeInterval"] != "2m" || len(array(object(c["api"])["services"])) != 2 {
-		t.Fatal("existing monitor changed")
-	}
-}
 
 func TestObservatoryStatusDecode(t *testing.T) {
 	v := []byte{8, 1, 16}
@@ -41,5 +25,38 @@ func TestObservatoryStatusDecode(t *testing.T) {
 	}
 	if _, err := parseExitStatuses([]byte{10, 255}); err == nil {
 		t.Fatal("malformed message accepted")
+	}
+}
+
+func TestTCPExitProbeAndChainedEndpoint(t *testing.T) {
+	outs := map[string]jsonObject{"vpn": {"protocol": "vless", "settings": jsonObject{"vnext": []any{jsonObject{"address": "example.test", "port": 443}}}}, "chain": {"protocol": "freedom", "proxySettings": jsonObject{"tag": "vpn"}}}
+	if address := exitTCPAddress("chain", outs, map[string]bool{}); address != "example.test:443" {
+		t.Fatal(address)
+	}
+	outs["vpn"]["streamSettings"] = jsonObject{"network": "quic"}
+	if exitTCPAddress("vpn", outs, map[string]bool{}) != "" {
+		t.Fatal("UDP treated as TCP")
+	}
+	outs["chain"]["proxySettings"] = jsonObject{"tag": "chain"}
+	if exitTCPAddress("chain", outs, map[string]bool{}) != "" {
+		t.Fatal("proxy loop not bounded")
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	s := probeTCPExit("test", address)
+	if !s.Alive || !s.Supported || s.LastTry == 0 {
+		t.Fatal("live server not detected", s)
+	}
+	_ = listener.Close()
+	s = probeTCPExit("test", address)
+	if s.Alive || !s.Supported || s.LastTry == 0 {
+		t.Fatal("closed server not detected", s)
+	}
+	s = probeTCPExit("unsupported", "")
+	if s.Alive || s.Supported || s.LastTry != 0 {
+		t.Fatal("unsupported endpoint marked down")
 	}
 }

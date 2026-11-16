@@ -1,18 +1,22 @@
 package main
 
 import (
-	"errors"
+	"context"
+	"fmt"
+	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type exitStatus struct {
-	Tag      string `json:"tag"`
-	Alive    bool   `json:"alive"`
-	Delay    int64  `json:"delay_ms"`
-	LastSeen int64  `json:"last_seen"`
-	LastTry  int64  `json:"last_try"`
+	Tag       string `json:"tag"`
+	Alive     bool   `json:"alive"`
+	Delay     int64  `json:"delay_ms"`
+	LastSeen  int64  `json:"last_seen"`
+	LastTry   int64  `json:"last_try"`
+	Supported bool   `json:"supported"`
 }
 
 type exitHealth struct {
@@ -21,6 +25,7 @@ type exitHealth struct {
 	StaleAfter int64        `json:"stale_after"`
 	Error      string       `json:"error"`
 	Outbounds  []exitStatus `json:"outbounds"`
+	Mode       string       `json:"mode"`
 }
 
 func isVPNExit(c jsonObject) bool {
@@ -34,34 +39,62 @@ func isVPNExit(c jsonObject) bool {
 	}
 }
 
-func enableExitProbes(c jsonObject) error {
-	if c["observatory"] == nil {
-		if c["burstObservatory"] != nil {
-			return errors.New("burstObservatory already configured; existing monitoring left unchanged")
+// Проверяется только открытие TCP, без TLS, авторизации и передачи VPN-трафика.
+// Ничего не добавляется в конфигурацию Xray. UDP-ядра не объявляются недоступными.
+func exitTCPAddress(tag string, outs map[string]jsonObject, seen map[string]bool) string {
+	if seen[tag] {
+		return ""
+	}
+	seen[tag] = true
+	c := outs[tag]
+	if str(c["protocol"]) == "freedom" {
+		upstream := str(object(c["proxySettings"])["tag"])
+		if upstream == "" {
+			upstream = str(object(object(c["streamSettings"])["sockopt"])["dialerProxy"])
 		}
-		var tags []any
-		for _, v := range array(c["outbounds"]) {
-			o := object(v)
-			if isVPNExit(o) && str(o["tag"]) != "" {
-				tags = append(tags, o["tag"])
+		return exitTCPAddress(upstream, outs, seen)
+	}
+	switch str(c["protocol"]) {
+	case "vless", "vmess", "trojan", "shadowsocks", "socks", "http":
+	default:
+		return ""
+	}
+	network := str(object(c["streamSettings"])["network"])
+	switch network {
+	case "quic", "kcp", "mkcp", "hysteria", "hysteria2":
+		return ""
+	}
+	settings := object(c["settings"])
+	for _, key := range []string{"vnext", "servers"} {
+		for _, v := range array(settings[key]) {
+			server := object(v)
+			host := str(server["address"])
+			port, err := strconv.Atoi(fmt.Sprint(server["port"]))
+			if host != "" && err == nil && port > 0 && port <= 65535 {
+				return net.JoinHostPort(host, strconv.Itoa(port))
 			}
 		}
-		if len(tags) == 0 {
-			return errors.New("no tagged VPN outbounds found for probes")
-		}
-		c["observatory"] = jsonObject{"subjectSelector": tags, "probeUrl": "https://www.gstatic.com/generate_204", "probeInterval": "1m", "enableConcurrency": true}
 	}
-	api := object(c["api"])
-	if api == nil {
-		return errors.New("API required for ObservatoryService")
+	return ""
+}
+
+func probeTCPExit(tag, address string) exitStatus {
+	s := exitStatus{Tag: tag, Supported: address != ""}
+	if !s.Supported {
+		return s
 	}
-	for _, v := range array(api["services"]) {
-		if v == "ObservatoryService" {
-			return nil
-		}
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
+	s.LastTry = time.Now().Unix()
+	if err == nil {
+		_ = conn.Close()
+		s.Alive = true
+		s.Delay = time.Since(start).Milliseconds()
+		s.LastSeen = s.LastTry
 	}
-	api["services"] = append(array(api["services"]), "ObservatoryService")
-	return nil
+	return s
 }
 
 func parseExitStatuses(data []byte) (map[string]exitStatus, error) {
@@ -86,7 +119,7 @@ func parseExitStatuses(data []byte) (map[string]exitStatus, error) {
 			if err != nil {
 				return nil, err
 			}
-			s := exitStatus{}
+			s := exitStatus{Supported: true}
 			for _, v := range fs {
 				switch v.Number {
 				case 1:
@@ -110,12 +143,20 @@ func parseExitStatuses(data []byte) (map[string]exitStatus, error) {
 }
 
 func (a *App) sampleExitHealth() {
-	if time.Since(a.lastHealthAttempt) < 15*time.Second {
+	a.mu.Lock()
+	if a.healthWorking || time.Since(a.lastHealthAttempt) < 2*time.Minute {
+		a.mu.Unlock()
 		return
 	}
+	a.healthWorking = true
 	a.lastHealthAttempt = time.Now()
-	h := exitHealth{StaleAfter: 180, Outbounds: []exitStatus{}}
-	defer func() { a.mu.Lock(); a.exitHealth = h; a.mu.Unlock() }()
+	a.mu.Unlock()
+	go a.collectExitHealth()
+}
+
+func (a *App) collectExitHealth() {
+	h := exitHealth{StaleAfter: 360, Outbounds: []exitStatus{}, Mode: "tcp"}
+	defer func() { a.mu.Lock(); a.exitHealth = h; a.healthWorking = false; a.mu.Unlock() }()
 	c, _, err := readXrayObjects(a.configPath)
 	if err != nil {
 		h.Error = "Не удалось прочитать настройки проверки выходов"
@@ -123,8 +164,40 @@ func (a *App) sampleExitHealth() {
 	}
 	obs := object(c["observatory"])
 	if obs == nil {
+		a.mu.Lock()
+		previous := map[string]int64{}
+		for _, s := range a.exitHealth.Outbounds {
+			previous[s.Tag] = s.LastSeen
+		}
+		a.mu.Unlock()
+		outs := configuredTags(c, "outbounds")
+		var tags []string
+		for tag, o := range outs {
+			if isVPNExit(o) {
+				tags = append(tags, tag)
+			}
+		}
+		sort.Strings(tags)
+		h.Enabled = len(tags) > 0
+		// Один запрос за раз, не более трёх секунд на сервер и 15 секунд на цикл.
+		deadline := time.Now().Add(15 * time.Second)
+		for _, tag := range tags {
+			address := exitTCPAddress(tag, outs, map[string]bool{})
+			if time.Now().After(deadline) {
+				h.Outbounds = append(h.Outbounds, exitStatus{Tag: tag, Supported: address != ""})
+				continue
+			}
+			s := probeTCPExit(tag, address)
+			if !s.Alive {
+				s.LastSeen = previous[tag]
+			}
+			h.Outbounds = append(h.Outbounds, s)
+		}
+		h.Checked = time.Now().Unix()
 		return
 	}
+	h.Mode = "observatory"
+	h.StaleAfter = 180
 	h.Enabled = true
 	if interval, err := time.ParseDuration(str(obs["probeInterval"])); err == nil && interval > time.Minute {
 		h.StaleAfter = int64((interval * 3) / time.Second)

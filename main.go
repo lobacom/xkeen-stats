@@ -84,6 +84,7 @@ type App struct {
 	lanCIDR                                             string
 	exitHealth                                          exitHealth
 	lastHealthAttempt                                   time.Time
+	healthWorking                                       bool
 	rpc                                                 *http.Client
 	authMu                                              sync.Mutex
 	loginGate                                           chan struct{}
@@ -605,7 +606,6 @@ func main() {
 	installXray := flag.String("xray-binary", "", "Xray executable override for installer")
 	installSource := flag.String("source-config", "", "Generator source JSON; must match active configuration")
 	installAllowRestart := flag.Bool("allow-xray-restart", false, "Allow the one-time Xray restart if statistics need enabling")
-	installProbes := flag.Bool("enable-probes", false, "Enable Xray Observatory HTTPS probes for VPN outbounds every minute")
 	firewall := flag.Bool("firewall", false, "Apply the LAN-only firewall rules from service.json")
 	setPassword := flag.Bool("set-password", false, "Read a new password from stdin; run with the service stopped")
 	checkAuth := flag.Bool("check-auth", false, "Validate the private authentication file and exit")
@@ -628,7 +628,7 @@ func main() {
 	if *install || *installPlan {
 		explicit := map[string]bool{}
 		flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
-		err := runInstaller(a, installOptions{PlanOnly: *installPlan, Interface: *installInterface, Init: *installRestart, Xray: *installXray, Source: *installSource, AllowRestart: *installAllowRestart, EnableProbes: *installProbes, Explicit: explicit})
+		err := runInstaller(a, installOptions{PlanOnly: *installPlan, Interface: *installInterface, Init: *installRestart, Xray: *installXray, Source: *installSource, AllowRestart: *installAllowRestart, Explicit: explicit})
 		if err != nil {
 			log.Fatal(err)
 		}
