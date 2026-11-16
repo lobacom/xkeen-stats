@@ -14,8 +14,9 @@ case "$1" in
     if test -x /opt/var/lib/xkeen-stats/update/updater; then
       /opt/var/lib/xkeen-stats/update/updater -recover-update || exit 1
     fi
+    /opt/sbin/xkeen-stats -prepare-auth || exit 1
     /opt/etc/ndm/netfilter.d/051-xkeen-stats-lan.sh || exit 1
-    /opt/sbin/xkeen-stats -check-auth >/dev/null 2>&1 || exit 1
+    /opt/sbin/xkeen-stats -check-access >/dev/null 2>&1 || exit 1
     ;;
 esac
 . /opt/etc/init.d/rc.func

@@ -115,16 +115,24 @@ func setPasswordFromInput(path string, input io.Reader) error {
 	if len(password) < 8 || len(password) > 1024 || strings.ContainsAny(password, "\r\n") {
 		return errors.New("password must be 8 to 1024 bytes on one line")
 	}
-	salt := make([]byte, 16)
-	if _, err = rand.Read(salt); err != nil {
-		return err
-	}
-	hash, err := pbkdf2.Key(sha256.New, password, salt, passwordIterations, 32)
+	c, err := newAuthConfig(password)
 	if err != nil {
 		return err
 	}
-	c := authConfig{Version: 1, Algorithm: "pbkdf2-sha256", Iterations: passwordIterations, Salt: base64.RawStdEncoding.EncodeToString(salt), PasswordHash: base64.RawStdEncoding.EncodeToString(hash), Sessions: []authSession{}}
 	return writeAuth(path, c)
+}
+
+func newAuthConfig(password string) (authConfig, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return authConfig{}, err
+	}
+	hash, err := pbkdf2.Key(sha256.New, password, salt, passwordIterations, 32)
+	if err != nil {
+		return authConfig{}, err
+	}
+	c := authConfig{Version: 1, Algorithm: "pbkdf2-sha256", Iterations: passwordIterations, Salt: base64.RawStdEncoding.EncodeToString(salt), PasswordHash: base64.RawStdEncoding.EncodeToString(hash), Sessions: []authSession{}}
+	return c, nil
 }
 
 func passwordMatches(c authConfig, password string) bool {

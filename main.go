@@ -77,6 +77,8 @@ type App struct {
 	authMu                                              sync.Mutex
 	loginGate                                           chan struct{}
 	failures                                            map[string]loginFailure
+	allowSetup                                          bool
+	setupTokenPath                                      string
 	updater                                             *updater
 }
 
@@ -526,6 +528,14 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		a.logout(w, r)
 		return
 	}
+	if r.URL.Path == "/auth/status" {
+		a.authStatus(w, r)
+		return
+	}
+	if r.URL.Path == "/auth/setup" {
+		a.setup(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/update") {
 		a.updateHandler(w, r)
 		return
@@ -575,10 +585,14 @@ func main() {
 	flag.StringVar(&a.listen, "listen", "192.168.1.1:1001", "LAN address")
 	flag.StringVar(&a.configPath, "config", "/opt/etc/xray/configs/00_cascade.json", "Xray configuration")
 	flag.StringVar(&a.authPath, "auth", "/opt/etc/xkeen-stats/auth.json", "Private password hash and sessions")
+	flag.StringVar(&a.setupTokenPath, "setup-token", "/opt/etc/xkeen-stats/setup-token", "Private one-time setup token")
 	flag.StringVar(&a.statePath, "state", "/opt/var/lib/xkeen-stats/state.json", "Statistics state")
 	flag.StringVar(&a.apiAddress, "api", "127.0.0.1:10085", "Xray StatsService")
 	setPassword := flag.Bool("set-password", false, "Read a new password from stdin; run with the service stopped")
 	checkAuth := flag.Bool("check-auth", false, "Validate the private authentication file and exit")
+	prepareAuth := flag.Bool("prepare-auth", false, "Prepare first-run access and print its private setup link")
+	showSetupLink := flag.Bool("setup-link", false, "Print the private first-run setup link")
+	checkAccess := flag.Bool("check-access", false, "Validate configured login or protected first-run access")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	checkInstall := flag.Bool("check-install", false, "Check compatibility with current configuration and data")
 	updateDir := flag.String("update-dir", "/opt/var/lib/xkeen-stats/update", "Private update directory")
@@ -608,11 +622,39 @@ func main() {
 		fmt.Println("Password saved; all statistics sessions revoked")
 		return
 	}
-	if _, err := readAuth(a.authPath); err != nil {
-		log.Fatalf("Authentication unavailable: %v; initialize with -set-password", err)
+	if *checkAuth || *checkInstall {
+		if _, err := readAuth(a.authPath); err != nil {
+			log.Fatalf("Authentication unavailable: %v", err)
+		}
 	}
 	if *checkAuth {
 		return
+	}
+	if *prepareAuth || *showSetupLink || *checkAccess {
+		required, err := initialAccess(a.authPath, a.setupTokenPath, !*checkAccess)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if required && !*checkAccess {
+			token, err := readSetupToken(a.setupTokenPath)
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Println("Initial setup: http://" + a.listen + "/#setup=" + token)
+		} else if *showSetupLink {
+			fmt.Println("Password is already configured")
+		}
+		return
+	}
+	if !*checkInstall {
+		required, err := initialAccess(a.authPath, a.setupTokenPath, true)
+		if err != nil {
+			log.Fatalf("Authentication unavailable: %v", err)
+		}
+		a.allowSetup = required
+		if required {
+			log.Print("Initial password setup required; use -setup-link to obtain the private link")
+		}
 	}
 	p := new(http.Protocols)
 	p.SetUnencryptedHTTP2(true)
