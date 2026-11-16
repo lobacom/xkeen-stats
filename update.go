@@ -346,9 +346,15 @@ func (a *App) updateHandler(w http.ResponseWriter, r *http.Request) {
 		authReply(w, 409, "Обновление уже выполняется")
 		return
 	}
+	if !a.managementMu.TryLock() {
+		u.mu.Unlock()
+		authReply(w, 409, "Дождитесь завершения изменения VPN")
+		return
+	}
 	u.working = true
 	u.mu.Unlock()
 	go func() {
+		defer a.managementMu.Unlock()
 		if err := u.prepare(input.Version); err != nil {
 			_ = setUpdateProgress(u.dir, "failed", input.Version, err.Error())
 			_ = os.Remove(filepath.Join(u.dir, "pending.json"))

@@ -25,6 +25,9 @@ import (
 //go:embed index.html
 var page []byte
 
+//go:embed management.js
+var managementScript []byte
+
 type Traffic struct {
 	Up   int64 `json:"up"`
 	Down int64 `json:"down"`
@@ -74,6 +77,9 @@ type App struct {
 	lastError                                           string
 	saveError                                           string
 	labelsError                                         string
+	managementMu                                        sync.Mutex
+	managementExec                                      func(managementConfig, []string, string) error
+	sampleMu                                            sync.Mutex
 	configPath, authPath, statePath, apiAddress, listen string
 	rpc                                                 *http.Client
 	authMu                                              sync.Mutex
@@ -350,6 +356,8 @@ func (a *App) merge(current map[string]Traffic, online map[string][]string, sess
 }
 
 func (a *App) sample() {
+	a.sampleMu.Lock()
+	defer a.sampleMu.Unlock()
 	session := xraySession()
 	if session == "" {
 		a.failed(errors.New("Xray process not found"))
@@ -513,7 +521,7 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 	if r.Host != a.listen {
 		http.Error(w, "Invalid host", http.StatusForbidden)
 		return
@@ -541,6 +549,10 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		a.setup(w, r)
 		return
 	}
+	if r.URL.Path == "/api/manage" || strings.HasPrefix(r.URL.Path, "/api/manage/") {
+		a.managementHandler(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/update") {
 		a.updateHandler(w, r)
 		return
@@ -563,6 +575,11 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(page)
+		return
+	}
+	if r.URL.Path == "/management.js" {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		_, _ = w.Write(managementScript)
 		return
 	}
 	if r.URL.Path != "/api/stats" {
@@ -673,6 +690,9 @@ func main() {
 		}
 		return
 	}
+	if err := a.recoverManagement(); err != nil {
+		log.Fatalf("VPN management recovery failed: %v", err)
+	}
 	a.updater = &updater{app: a, dir: *updateDir, client: newUpdateClient()}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -691,7 +711,7 @@ func main() {
 			}
 		}
 	}()
-	server := &http.Server{Addr: a.listen, Handler: http.HandlerFunc(a.handle), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
+	server := &http.Server{Addr: a.listen, Handler: http.HandlerFunc(a.handle), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 120 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
 	go func() {
 		<-stop
 		if err := a.save(); err != nil {
