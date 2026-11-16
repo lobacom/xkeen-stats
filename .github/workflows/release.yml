@@ -34,6 +34,8 @@ jobs:
           release_commit=$(git rev-parse HEAD)
           go test ./...
           go vet ./...
+          node .github/check-ui.cjs
+          sudo --preserve-env=PATH,GITHUB_ACTIONS bash .github/test-install.sh
           mkdir -p dist
           for arch in amd64 arm64 arm mips mipsle; do
             name="$arch"
@@ -42,9 +44,9 @@ jobs:
               go build -trimpath -ldflags="-s -w -X main.version=$RELEASE_TAG -X main.revision=$release_commit" \
               -o "dist/xkeen-stats-linux-$name" .
           done
+          cp install.sh THIRD_PARTY_NOTICES.md dist/
           printf '# xkeen-stats %s\n' "$RELEASE_TAG" > dist/SHA256SUMS
-          (cd dist && sha256sum xkeen-stats-linux-*) >> dist/SHA256SUMS
-          cp THIRD_PARTY_NOTICES.md dist/
+          (cd dist && sha256sum xkeen-stats-linux-* install.sh THIRD_PARTY_NOTICES.md) >> dist/SHA256SUMS
       - name: Sign manifest
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}

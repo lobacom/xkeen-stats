@@ -81,6 +81,9 @@ type App struct {
 	managementExec                                      func(managementConfig, []string, string) error
 	sampleMu                                            sync.Mutex
 	configPath, authPath, statePath, apiAddress, listen string
+	lanCIDR                                             string
+	exitHealth                                          exitHealth
+	lastHealthAttempt                                   time.Time
 	rpc                                                 *http.Client
 	authMu                                              sync.Mutex
 	loginGate                                           chan struct{}
@@ -144,7 +147,11 @@ func fields(data []byte) ([]Field, error) {
 }
 
 func (a *App) call(method string) ([]byte, error) {
-	req, err := http.NewRequest("POST", "http://"+a.apiAddress+"/xray.app.stats.command.StatsService/"+method, bytes.NewReader(make([]byte, 5)))
+	return a.rpcCall("xray.app.stats.command.StatsService", method)
+}
+
+func (a *App) rpcCall(service, method string) ([]byte, error) {
+	req, err := http.NewRequest("POST", "http://"+a.apiAddress+"/"+service+"/"+method, bytes.NewReader(make([]byte, 5)))
 	if err != nil {
 		return nil, err
 	}
@@ -270,30 +277,9 @@ func isXrayServer(cmdline []byte) bool {
 	return true
 }
 
-func xraySession() string {
-	boot, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
-	dirs, _ := filepath.Glob("/proc/[0-9]*/comm")
-	for _, p := range dirs {
-		b, err := os.ReadFile(p)
-		if err != nil || strings.TrimSpace(string(b)) != "xray" {
-			continue
-		}
-		cmdline, err := os.ReadFile(filepath.Join(filepath.Dir(p), "cmdline"))
-		if err != nil || !isXrayServer(cmdline) {
-			continue
-		}
-		stat, err := os.ReadFile(filepath.Join(filepath.Dir(p), "stat"))
-		if err != nil {
-			continue
-		}
-		_, tail, ok := strings.Cut(string(stat), ") ")
-		fs := strings.Fields(tail)
-		if ok && len(fs) > 19 {
-			return strings.TrimSpace(string(boot)) + ":" + filepath.Base(filepath.Dir(p)) + ":" + fs[19]
-		}
-	}
-	return ""
-}
+var xrayTracker = processTracker{root: "/proc"}
+
+func xraySession() string { return xrayTracker.session() }
 
 var moscow = time.FixedZone("MSK", 3*3600)
 
@@ -358,6 +344,7 @@ func (a *App) merge(current map[string]Traffic, online map[string][]string, sess
 func (a *App) sample() {
 	a.sampleMu.Lock()
 	defer a.sampleMu.Unlock()
+	defer a.sampleExitHealth()
 	session := xraySession()
 	if session == "" {
 		a.failed(errors.New("Xray process not found"))
@@ -455,7 +442,7 @@ func (a *App) rows() ([]Row, error) {
 		Inbounds  []channelConfig `json:"inbounds"`
 		Outbounds []channelConfig `json:"outbounds"`
 	}
-	b, err := os.ReadFile(a.configPath)
+	b, err := readXrayView(a.configPath)
 	if err != nil {
 		return nil, err
 	}
@@ -528,8 +515,7 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	addr, _, err := net.SplitHostPort(r.RemoteAddr)
 	ip := net.ParseIP(addr)
-	_, lan, _ := net.ParseCIDR("192.168.1.0/24")
-	if err != nil || (!lan.Contains(ip) && !ip.IsLoopback()) {
+	if err != nil || !a.permitsIP(ip) {
 		http.Error(w, "LAN only", http.StatusForbidden)
 		return
 	}
@@ -599,17 +585,28 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Не удалось прочитать список профилей"}`, 503)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"rows": rows, "since": a.state.Since, "updated": a.lastOK, "saved": a.state.Saved, "error": a.lastError, "save_error": a.saveError, "labels_error": a.labelsError, "now": time.Now().Unix(), "interval": 5})
+	_ = json.NewEncoder(w).Encode(map[string]any{"rows": rows, "since": a.state.Since, "updated": a.lastOK, "saved": a.state.Saved, "error": a.lastError, "save_error": a.saveError, "labels_error": a.labelsError, "now": time.Now().Unix(), "interval": 5, "exit_health": a.exitHealth})
 }
 
 func main() {
+	cfg, cfgErr := readServiceConfig()
 	a := &App{live: map[string]Live{}, loginGate: make(chan struct{}, 1), failures: map[string]loginFailure{}}
-	flag.StringVar(&a.listen, "listen", "192.168.1.1:1001", "LAN address")
-	flag.StringVar(&a.configPath, "config", "/opt/etc/xray/configs/00_cascade.json", "Xray configuration")
-	flag.StringVar(&a.authPath, "auth", "/opt/etc/xkeen-stats/auth.json", "Private password hash and sessions")
-	flag.StringVar(&a.setupTokenPath, "setup-token", "/opt/etc/xkeen-stats/setup-token", "Private one-time setup token")
-	flag.StringVar(&a.statePath, "state", "/opt/var/lib/xkeen-stats/state.json", "Statistics state")
-	flag.StringVar(&a.apiAddress, "api", "127.0.0.1:10085", "Xray StatsService")
+	flag.StringVar(&a.listen, "listen", cfg.Listen, "LAN address")
+	flag.StringVar(&a.lanCIDR, "lan", cfg.LAN, "Allowed LAN subnet")
+	flag.StringVar(&a.configPath, "config", cfg.Config, "Xray configuration file or directory")
+	flag.StringVar(&a.authPath, "auth", cfg.Auth, "Private password hash and sessions")
+	flag.StringVar(&a.setupTokenPath, "setup-token", cfg.SetupToken, "Private one-time setup token")
+	flag.StringVar(&a.statePath, "state", cfg.State, "Statistics state")
+	flag.StringVar(&a.apiAddress, "api", cfg.API, "Xray StatsService")
+	install := flag.Bool("install", false, "Install on Keenetic/Entware; backs up and validates changes")
+	installPlan := flag.Bool("install-plan", false, "Show detected installation plan without changes")
+	installInterface := flag.String("interface", "", "LAN interface override for installer")
+	installRestart := flag.String("xkeen-init", "", "XKeen init script override for installer")
+	installXray := flag.String("xray-binary", "", "Xray executable override for installer")
+	installSource := flag.String("source-config", "", "Generator source JSON; must match active configuration")
+	installAllowRestart := flag.Bool("allow-xray-restart", false, "Allow the one-time Xray restart if statistics need enabling")
+	installProbes := flag.Bool("enable-probes", false, "Enable Xray Observatory HTTPS probes for VPN outbounds every minute")
+	firewall := flag.Bool("firewall", false, "Apply the LAN-only firewall rules from service.json")
 	setPassword := flag.Bool("set-password", false, "Read a new password from stdin; run with the service stopped")
 	checkAuth := flag.Bool("check-auth", false, "Validate the private authentication file and exit")
 	prepareAuth := flag.Bool("prepare-auth", false, "Prepare first-run access and print its private setup link")
@@ -623,6 +620,24 @@ func main() {
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
+		return
+	}
+	if cfgErr != nil {
+		log.Fatalf("Cannot read service.json: %v", cfgErr)
+	}
+	if *install || *installPlan {
+		explicit := map[string]bool{}
+		flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+		err := runInstaller(a, installOptions{PlanOnly: *installPlan, Interface: *installInterface, Init: *installRestart, Xray: *installXray, Source: *installSource, AllowRestart: *installAllowRestart, EnableProbes: *installProbes, Explicit: explicit})
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *firewall {
+		if err := applyFirewall(cfg); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 	if *applyJob != "" {
@@ -669,6 +684,9 @@ func main() {
 		return
 	}
 	if !*checkInstall {
+		if _, err := validateLAN(a.listen, a.lanCIDR); err != nil {
+			log.Fatal(err)
+		}
 		required, err := initialAccess(a.authPath, a.setupTokenPath, true)
 		if err != nil {
 			log.Fatalf("Authentication unavailable: %v", err)

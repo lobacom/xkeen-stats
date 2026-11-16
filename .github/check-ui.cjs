@@ -1,0 +1,13 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const html=fs.readFileSync('index.html','utf8');
+for(const match of html.matchAll(/<script>([\s\S]*?)<\/script>/g))new vm.Script(match[1]);
+new vm.Script(fs.readFileSync('management.js','utf8'));
+const fn=html.match(/function exitStatus\(tag\)\{[^\n]+/)[0];
+const context={data:{now:1000,exit_health:{enabled:true,checked:999,stale_after:180,outbounds:[{tag:'test',alive:true,delay_ms:100,last_try:995,last_seen:995}]}}};vm.createContext(context);vm.runInContext(fn,context);
+const status=()=>vm.runInContext("exitStatus('test').state",context);
+assert.equal(status(),'up');context.data.exit_health.outbounds[0].alive=false;assert.equal(status(),'down');
+context.data.exit_health.outbounds[0].last_try=100;context.data.exit_health.outbounds[0].last_seen=100;assert.equal(status(),'unknown');
+context.data.exit_health.outbounds[0].last_try=995;context.data.exit_health.checked=100;assert.equal(status(),'unknown');
+context.data.exit_health.checked=999;context.data.exit_health.error='unavailable';assert.equal(status(),'unknown');
+assert.equal(vm.runInContext("exitStatus('missing').state",context),'unknown');
+console.log('UI syntax and VPN up/down/stale/missing-data checks passed');

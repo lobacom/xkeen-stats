@@ -26,7 +26,8 @@ el('vpn-profile-download').onclick=()=>{const url=URL.createObjectURL(new Blob([
 el('vpn-lan-apply').onclick=async()=>{el('vpn-lan-apply').disabled=true;try{await apply('/api/manage/lan',{outbound:el('vpn-lan-exit').value})}catch{}finally{el('vpn-lan-apply').disabled=false}};
 el('vpn-add-client').onclick=()=>edit();el('vpn-refresh').onclick=load;root.addEventListener('toggle',()=>{if(root.open)load()});
 document.querySelectorAll('.vpn-dialog').forEach(d=>d.addEventListener('cancel',e=>{if(changing)e.preventDefault()}));
-window.vpnManagement={get enabled(){return !!snapshot?.enabled},canEdit:name=>!!snapshot?.clients?.some(c=>c.name===name)};
+window.vpnManagement={get enabled(){return !!snapshot?.enabled},get selectedExit(){return snapshot?.lan_enabled?snapshot.lan_exit:''},canEdit:name=>!!snapshot?.clients?.some(c=>c.name===name)};
+document.addEventListener('vpn-exit-health',e=>{for(const option of el('vpn-lan-exit').options){const output=snapshot?.outbounds?.find(o=>o.tag===option.value);if(output)option.textContent=output.title+' · '+e.detail.status(option.value).text}});
 document.addEventListener('vpn-auth-ready',()=>{if(!snapshot)load()});
 if(!el('dashboard').classList.contains('hidden'))load();
 document.querySelectorAll('[data-vpn-close]').forEach(b=>b.onclick=()=>{if(!changing)el(b.dataset.vpnClose).close()});

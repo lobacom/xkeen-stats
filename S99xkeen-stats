@@ -1,7 +1,7 @@
 #!/opt/bin/sh
 ENABLED=yes
 PROCS=xkeen-stats
-ARGS="-listen 192.168.1.1:1001 -state /opt/var/lib/xkeen-stats/state.json"
+ARGS=""
 PREARGS=""
 DESC="$PROCS"
 PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
