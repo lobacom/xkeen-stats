@@ -44,6 +44,7 @@ jobs:
           done
           printf '# xkeen-stats %s\n' "$RELEASE_TAG" > dist/SHA256SUMS
           (cd dist && sha256sum xkeen-stats-linux-*) >> dist/SHA256SUMS
+          cp THIRD_PARTY_NOTICES.md dist/
       - name: Sign manifest
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
