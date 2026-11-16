@@ -96,9 +96,10 @@ type managementConfig struct {
 	} `json:"lan"`
 }
 type managedInput struct {
-	Tag    string `json:"tag"`
-	Title  string `json:"title"`
-	Export bool   `json:"export_ready"`
+	Tag        string `json:"tag"`
+	Title      string `json:"title"`
+	Export     bool   `json:"export_ready"`
+	NamePrefix string `json:"name_prefix"`
 }
 type managedClient struct {
 	Name   string   `json:"name"`
@@ -109,13 +110,14 @@ type managedOutput struct {
 	Title string `json:"title"`
 }
 type managementSnapshot struct {
-	Enabled    bool            `json:"enabled"`
-	Revision   string          `json:"revision"`
-	Inputs     []managedInput  `json:"inbounds"`
-	Clients    []managedClient `json:"clients"`
-	Outputs    []managedOutput `json:"outbounds"`
-	LANExit    string          `json:"lan_exit"`
-	LANEnabled bool            `json:"lan_enabled"`
+	Enabled          bool            `json:"enabled"`
+	Revision         string          `json:"revision"`
+	SettingsRevision string          `json:"settings_revision"`
+	Inputs           []managedInput  `json:"inbounds"`
+	Clients          []managedClient `json:"clients"`
+	Outputs          []managedOutput `json:"outbounds"`
+	LANExit          string          `json:"lan_exit"`
+	LANEnabled       bool            `json:"lan_enabled"`
 }
 
 func (a *App) managementDir() string { return filepath.Join(filepath.Dir(a.authPath), "management") }
@@ -184,7 +186,7 @@ func configuredTags(cfg jsonObject, key string) map[string]jsonObject {
 }
 
 func (a *App) managementSnapshot(mc managementConfig, cfg jsonObject, b []byte) managementSnapshot {
-	s := managementSnapshot{Enabled: true, Revision: configRevision(b), Inputs: []managedInput{}, Clients: []managedClient{}, Outputs: []managedOutput{}}
+	s := managementSnapshot{Enabled: true, Revision: configRevision(b), SettingsRevision: managementSettingsRevision(mc), Inputs: []managedInput{}, Clients: []managedClient{}, Outputs: []managedOutput{}}
 	labels, _ := readChannelLabels(a.authPath)
 	clients := map[string][]string{}
 	for _, v := range array(cfg["inbounds"]) {
@@ -198,7 +200,7 @@ func (a *App) managementSnapshot(mc managementConfig, cfg jsonObject, b []byte) 
 			title = tag
 		}
 		e, ok := mc.Profiles[tag]
-		s.Inputs = append(s.Inputs, managedInput{tag, title, ok && e.Address != "" && e.Port > 0 && e.Port <= 65535})
+		s.Inputs = append(s.Inputs, managedInput{Tag: tag, Title: title, Export: ok && e.Address != "" && e.Port > 0 && e.Port <= 65535, NamePrefix: e.NamePrefix})
 		for _, cv := range array(object(i["settings"])["clients"]) {
 			name := str(object(cv)["email"])
 			if name != "" {
@@ -575,6 +577,51 @@ func profileDisplayName(endpoint profileEndpoint, name, tag string) string {
 	return tag + "-" + name
 }
 
+func managementSettingsRevision(mc managementConfig) string {
+	b, _ := json.Marshal(mc)
+	return configRevision(b)
+}
+func (a *App) changeProfilePrefix(mc managementConfig, revision, tag, prefix string) (managementConfig, error) {
+	if revision == "" || revision != managementSettingsRevision(mc) {
+		return mc, errors.New("Настройки профилей изменились. Обновите список")
+	}
+	if utf8.RuneCountInString(prefix) > 80 || strings.ContainsFunc(prefix, unicode.IsControl) {
+		return mc, errors.New("Приставка должна содержать до 80 символов без переводов строк")
+	}
+	if _, ok := mc.Profiles[tag]; !ok {
+		return mc, errors.New("Экспорт профиля этого входа не настроен")
+	}
+	path := filepath.Join(filepath.Dir(a.authPath), "management.json")
+	settings, original, err := loadManagedConfig(path)
+	if err != nil {
+		return mc, errors.New("Не удалось прочитать настройки профилей")
+	}
+	latest, err := a.managementConfig()
+	if err != nil || managementSettingsRevision(latest) != revision {
+		return mc, errors.New("Настройки профилей изменились. Обновите список")
+	}
+	endpoint := object(object(settings["profiles"])[tag])
+	if endpoint == nil {
+		return mc, errors.New("Не найдены настройки выбранного входа")
+	}
+	endpoint["name_prefix"] = prefix
+	next, err := encodeManagedConfig(settings)
+	if err != nil {
+		return mc, err
+	}
+	current, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(current, original) {
+		return mc, errors.New("Настройки изменены другим приложением")
+	}
+	if err = atomicWrite(path, next); err != nil {
+		return mc, errors.New("Не удалось сохранить приставку")
+	}
+	updated := mc.Profiles[tag]
+	updated.NamePrefix = prefix
+	mc.Profiles[tag] = updated
+	return mc, nil
+}
+
 func makeProfile(cfg jsonObject, mc managementConfig, name, tag string) (string, error) {
 	i := configuredTags(cfg, "inbounds")[tag]
 	if i == nil || str(i["protocol"]) != "vless" {
@@ -686,12 +733,14 @@ func (a *App) managementHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Revision string   `json:"revision"`
-		Original string   `json:"original_name"`
-		Name     string   `json:"name"`
-		Inputs   []string `json:"inbounds"`
-		Inbound  string   `json:"inbound"`
-		Outbound string   `json:"outbound"`
+		Revision         string   `json:"revision"`
+		SettingsRevision string   `json:"settings_revision"`
+		Prefix           string   `json:"prefix"`
+		Original         string   `json:"original_name"`
+		Name             string   `json:"name"`
+		Inputs           []string `json:"inbounds"`
+		Inbound          string   `json:"inbound"`
+		Outbound         string   `json:"outbound"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384))
 	if dec.Decode(&in) != nil {
@@ -709,11 +758,24 @@ func (a *App) managementHandler(w http.ResponseWriter, r *http.Request) {
 			authReply(w, 400, "Не удалось создать QR: профиль слишком большой")
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"name": profileDisplayName(mc.Profiles[in.Inbound], in.Name, in.Inbound), "uri": uri, "qr": "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)})
+		_ = json.NewEncoder(w).Encode(map[string]string{"name": profileDisplayName(mc.Profiles[in.Inbound], in.Name, in.Inbound), "name_prefix": mc.Profiles[in.Inbound].NamePrefix, "settings_revision": managementSettingsRevision(mc), "uri": uri, "qr": "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)})
 		return
 	}
 	if a.updater != nil && activePending(a.updater.dir) {
 		authReply(w, 409, "Дождитесь завершения обновления программы")
+		return
+	}
+	if r.URL.Path == "/api/manage/profile-name" {
+		if str(configuredTags(cfg, "inbounds")[in.Inbound]["protocol"]) != "vless" {
+			authReply(w, 400, "Недопустимый вход")
+			return
+		}
+		updated, e := a.changeProfilePrefix(mc, in.SettingsRevision, in.Inbound, in.Prefix)
+		if e != nil {
+			authReply(w, 409, e.Error())
+			return
+		}
+		_ = json.NewEncoder(w).Encode(a.managementSnapshot(updated, cfg, b))
 		return
 	}
 	if in.Revision == "" || in.Revision != configRevision(b) {

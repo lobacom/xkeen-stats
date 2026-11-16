@@ -199,6 +199,80 @@ func TestProfileNamesSupportInstallationPrefixWithoutChangingConnection(t *testi
 	}
 }
 
+func TestProfilePrefixCanBeEditedWithoutRestartOrClientChanges(t *testing.T) {
+	a := authApp(t)
+	mc := fixtureManagement()
+	mc.Source = a.configPath
+	mc.Xray = os.Args[0]
+	mc.Restart = []string{os.Args[0]}
+	b, _ := json.Marshal(mc)
+	var settings jsonObject
+	_ = json.Unmarshal(b, &settings)
+	settings["future_setting"] = "keep"
+	b, _ = json.Marshal(settings)
+	settingsPath := filepath.Join(filepath.Dir(a.authPath), "management.json")
+	_ = os.WriteFile(settingsPath, b, 0600)
+	_ = os.WriteFile(a.configPath, []byte(managementFixture), 0600)
+	a.managementExec = func(managementConfig, []string, string) error {
+		t.Fatal("prefix change executed Xray command")
+		return nil
+	}
+	configured, configErr := a.managementConfig()
+	if configErr != nil {
+		t.Fatal(configErr)
+	}
+	mc = configured
+	cookie := loggedInCookie(t, a)
+	revision := managementSettingsRevision(mc)
+	body := map[string]any{"settings_revision": revision, "inbound": "region-a", "prefix": "office-"}
+	if managementRequest(a, "/api/manage/profile-name", body, nil, "http://"+a.listen).Code != 401 || managementRequest(a, "/api/manage/profile-name", body, cookie, "https://evil.example").Code != 403 {
+		t.Fatal("prefix editing bypassed authorization")
+	}
+	w := managementRequest(a, "/api/manage/profile-name", body, cookie, "http://"+a.listen)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	var snapshot managementSnapshot
+	if json.Unmarshal(w.Body.Bytes(), &snapshot) != nil {
+		t.Fatal("invalid snapshot")
+	}
+	if managementRequest(a, "/api/manage/profile-name", body, cookie, "http://"+a.listen).Code != 409 {
+		t.Fatal("stale prefix edit accepted")
+	}
+	updated, err := a.managementConfig()
+	if err != nil || updated.Profiles["region-a"].NamePrefix != "office-" || updated.Profiles["region-b"].NamePrefix != "" {
+		t.Fatal("prefix applied to wrong input")
+	}
+	var saved jsonObject
+	b, _ = os.ReadFile(settingsPath)
+	_ = json.Unmarshal(b, &saved)
+	if saved["future_setting"] != "keep" {
+		t.Fatal("unrelated management setting lost")
+	}
+	data, _ := os.ReadFile(a.configPath)
+	if !bytes.Equal(data, []byte(managementFixture)) {
+		t.Fatal("prefix editing modified Xray config")
+	}
+	body["settings_revision"] = snapshot.SettingsRevision
+	body["prefix"] = ""
+	w = managementRequest(a, "/api/manage/profile-name", body, cookie, "http://"+a.listen)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	updated, err = a.managementConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri, err := makeProfile(fixtureConfig(t), updated, "alice", "region-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(uri)
+	if u.Fragment != "region-a-alice" || strings.Contains(u.Fragment, "tls") {
+		t.Fatal("neutral default unexpectedly assumes TLS")
+	}
+}
+
 func managementRequest(a *App, path string, body any, cookie *http.Cookie, origin string) *httptest.ResponseRecorder {
 	var b []byte
 	method := "GET"
