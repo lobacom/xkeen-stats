@@ -3,5 +3,8 @@
 *.html text eol=lf
 *.md text eol=lf
 *.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+VERSION text eol=lf
 go.mod text eol=lf
 S99xkeen-stats text eol=lf
