@@ -78,6 +78,7 @@ func cloneObject(v jsonObject) jsonObject {
 type profileEndpoint struct {
 	Address    string            `json:"address"`
 	Port       int               `json:"port"`
+	NamePrefix string            `json:"name_prefix,omitempty"`
 	Parameters map[string]string `json:"parameters"`
 }
 type managementConfig struct {
@@ -567,6 +568,13 @@ func jsonEqual(a, b []byte) bool {
 	return json.Unmarshal(a, &x) == nil && json.Unmarshal(b, &y) == nil && reflect.DeepEqual(x, y)
 }
 
+func profileDisplayName(endpoint profileEndpoint, name, tag string) string {
+	if endpoint.NamePrefix != "" {
+		return endpoint.NamePrefix + name
+	}
+	return tag + "-" + name
+}
+
 func makeProfile(cfg jsonObject, mc managementConfig, name, tag string) (string, error) {
 	i := configuredTags(cfg, "inbounds")[tag]
 	if i == nil || str(i["protocol"]) != "vless" {
@@ -629,7 +637,7 @@ func makeProfile(cfg jsonObject, mc managementConfig, name, tag string) (string,
 	if params.Get("security") == "reality" && params.Get("pbk") == "" {
 		return "", errors.New("В настройках экспорта не указан публичный ключ REALITY")
 	}
-	u := url.URL{Scheme: "vless", User: url.User(str(cl["id"])), Host: net.JoinHostPort(endpoint.Address, strconv.Itoa(endpoint.Port)), RawQuery: params.Encode(), Fragment: name + " · " + tag}
+	u := url.URL{Scheme: "vless", User: url.User(str(cl["id"])), Host: net.JoinHostPort(endpoint.Address, strconv.Itoa(endpoint.Port)), RawQuery: params.Encode(), Fragment: profileDisplayName(endpoint, name, tag)}
 	if len(u.String()) > 6000 {
 		return "", errors.New("Профиль слишком большой для QR")
 	}
@@ -701,7 +709,7 @@ func (a *App) managementHandler(w http.ResponseWriter, r *http.Request) {
 			authReply(w, 400, "Не удалось создать QR: профиль слишком большой")
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"uri": uri, "qr": "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)})
+		_ = json.NewEncoder(w).Encode(map[string]string{"name": profileDisplayName(mc.Profiles[in.Inbound], in.Name, in.Inbound), "uri": uri, "qr": "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)})
 		return
 	}
 	if a.updater != nil && activePending(a.updater.dir) {

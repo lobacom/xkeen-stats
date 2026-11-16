@@ -171,6 +171,34 @@ func TestProfileUsesMatchingInputCredentialAndExternalTLS(t *testing.T) {
 	}
 }
 
+func TestProfileNamesSupportInstallationPrefixWithoutChangingConnection(t *testing.T) {
+	cfg := fixtureConfig(t)
+	mc := fixtureManagement()
+	oldURI, err := makeProfile(cfg, mc, "alice", "region-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, _ := url.Parse(oldURI)
+	if old.Fragment != "region-a-alice" {
+		t.Fatal("unexpected default profile name")
+	}
+	ep := mc.Profiles["region-a"]
+	ep.NamePrefix = "office-tls-"
+	mc.Profiles["region-a"] = ep
+	uri, err := makeProfile(cfg, mc, "alice", "region-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(uri)
+	if u.Fragment != "office-tls-alice" {
+		t.Fatal("configured prefix missing")
+	}
+	u.Fragment = old.Fragment
+	if u.String() != old.String() {
+		t.Fatal("profile naming changed credentials or connection parameters")
+	}
+}
+
 func managementRequest(a *App, path string, body any, cookie *http.Cookie, origin string) *httptest.ResponseRecorder {
 	var b []byte
 	method := "GET"
@@ -221,6 +249,10 @@ func TestManagementSecretsRequireOwnSessionAndSameOrigin(t *testing.T) {
 	var data map[string]string
 	if json.Unmarshal(w.Body.Bytes(), &data) != nil {
 		t.Fatal("invalid profile response")
+	}
+	profileURL, parseErr := url.Parse(data["uri"])
+	if parseErr != nil || data["name"] != "region-a-alice" || profileURL.Fragment != data["name"] {
+		t.Fatal("dialog name and imported profile name differ")
 	}
 	png, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(data["qr"], "data:image/png;base64,"))
 	if err != nil || !bytes.HasPrefix(png, []byte{137, 80, 78, 71}) {
