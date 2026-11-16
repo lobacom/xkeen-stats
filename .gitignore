@@ -1,0 +1,22 @@
+# Локальные развёртывания, журналы, изображения с реальными данными и инструменты.
+/.local/
+/.tools/
+/outputs/
+/backups/
+/dist/
+__pycache__/
+*.pyc
+
+# Реквизиты и сохранённая статистика не должны попадать в репозиторий.
+.env
+.env.*
+!.env.example
+keenetic.txt
+*.pem
+*.key
+state*.json
+*.log
+
+# Локальные бинарники.
+/xkeen-stats
+/xkeen-stats.exe
