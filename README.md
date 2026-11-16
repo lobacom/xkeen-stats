@@ -102,9 +102,9 @@ Xray могут потеряться последние 5 секунд межд�
 В SSH-консоли Keenetic (NDMS):
 
 ```text
-exec /opt/bin/curl -fL --proto =https https://raw.githubusercontent.com/lobacom/xkeen-stats/main/install.sh -o /opt/tmp/xkeen-stats-install.sh
-exec /opt/bin/sh /opt/tmp/xkeen-stats-install.sh --check
-exec /opt/bin/sh /opt/tmp/xkeen-stats-install.sh -allow-xray-restart
+exec /opt/bin/curl -fL --proto =https https://raw.githubusercontent.com/lobacom/xkeen-stats/main/install.sh -o /tmp/xkeen-stats-install.sh
+exec /opt/bin/sh /tmp/xkeen-stats-install.sh --check
+exec /opt/bin/sh /tmp/xkeen-stats-install.sh -allow-xray-restart
 ```
 
 В shell Entware те же команды выполняются без начального `exec`.
@@ -485,8 +485,8 @@ init-скрипт также проверяет прерванную устан�
 сохраняется для ручного восстановления. Совместимые форматы auth/state должны
 сохраняться в выпусках с автоматическим обновлением.
 
-Первая установка поддержки обновлений требует ручного обновления бинарника и
-init-скрипта. После этого очередные версии устанавливаются со страницы.
+Первичная установка поддержки обновлений выполняется установщиком.
+После этого очередные версии устанавливаются со страницы.
 Доступны сборки Linux amd64, arm64, armv7, mips и mipsle (MIPS softfloat).
 Для другой архитектуры установка выполняется вручную.
 

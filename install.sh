@@ -24,7 +24,7 @@ EOF
 case "${1:-}" in --help|-h) usage; exit 0;; esac
 test "$(id -u)" = 0 || fail 'Запустите установщик от root в shell Entware.'
 test -f /opt/etc/init.d/rc.func || fail 'Сначала установите Entware и XKeen с Xray.'
-for tool in curl openssl od sha256sum base64 mktemp; do
+for tool in curl openssl od dd awk sha256sum base64 mktemp; do
   command -v "$tool" >/dev/null 2>&1 || fail "Не найдена утилита $tool. Нужны curl, ca-bundle, openssl-util и базовые утилиты Entware."
 done
 
@@ -32,14 +32,15 @@ done
 elf=/opt/bin/busybox
 test -f "$elf" || elf=/bin/busybox
 test -f "$elf" || fail 'Не найден ELF busybox для определения архитектуры.'
-machine=$(od -An -tu1 -j 18 -N 2 "$elf" | xargs)
-class=$(od -An -tu1 -j 4 -N 1 "$elf" | xargs)
+# Урезанный BusyBox od не поддерживает -A/-t/-j/-N; dd и od -b есть и в нём.
+machine=$(dd if="$elf" bs=1 skip=18 count=2 2>/dev/null | od -b | awk 'NR==1 {print $2, $3}')
+class=$(dd if="$elf" bs=1 skip=4 count=1 2>/dev/null | od -b | awk 'NR==1 {print $2}')
 case "$class:$machine" in
-  '2:62 0') arch=amd64;;
-  '2:183 0') arch=arm64;;
-  '1:40 0') case "$(uname -m)" in armv7*|armv8*) arch=armv7;; *) fail 'Требуется ARMv7 или новее.';; esac;;
-  '1:8 0') arch=mipsle;;
-  '1:0 8') arch=mips;;
+  '002:076 000') arch=amd64;;
+  '002:267 000') arch=arm64;;
+  '001:050 000') case "$(uname -m)" in armv7*|armv8*) arch=armv7;; *) fail 'Требуется ARMv7 или новее.';; esac;;
+  '001:010 000') arch=mipsle;;
+  '001:000 010') arch=mips;;
   *) fail "Нет сборки для ELF $class/$machine. Доступны amd64, arm64, armv7, mips и mipsle.";;
 esac
 
