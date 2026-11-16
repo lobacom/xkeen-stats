@@ -72,6 +72,20 @@ func TestSplitConfigViewAndComments(t *testing.T) {
 	}
 }
 
+func TestSingleConfigPreservesDefaultOutboundAndSourceComparison(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	raw := []byte(`{"outbounds":[{"tag":"first","protocol":"freedom"},{"tag":"second","protocol":"vless"},{"tag":"third","protocol":"blackhole"}]}`)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := decodeXrayObject(raw)
+	got, _, err := readXrayObjects(path)
+	if err != nil || !reflect.DeepEqual(want, got) {
+		t.Fatal("outbound order or source comparison changed", err)
+	}
+}
+
 func TestInstallationRollbackAndBackupIndex(t *testing.T) {
 	dir := t.TempDir()
 	backup := filepath.Join(dir, "backup")

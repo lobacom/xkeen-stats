@@ -130,6 +130,7 @@ func readXrayObjects(path string) (jsonObject, []string, error) {
 				continue
 			}
 			entries := array(merged[key])
+			var additions []any
 			for _, v := range array(value) {
 				tag := str(object(v)["tag"])
 				found := false
@@ -141,12 +142,13 @@ func readXrayObjects(path string) (jsonObject, []string, error) {
 					}
 				}
 				if !found {
-					if key == "outbounds" && !strings.Contains(strings.ToLower(filepath.Base(f)), "tail") {
-						entries = append([]any{v}, entries...)
-					} else {
-						entries = append(entries, v)
-					}
+					additions = append(additions, v)
 				}
+			}
+			if key == "outbounds" && !strings.Contains(strings.ToLower(filepath.Base(f)), "tail") {
+				entries = append(additions, entries...)
+			} else {
+				entries = append(entries, additions...)
 			}
 			merged[key] = entries
 		}
