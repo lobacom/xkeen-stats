@@ -12,3 +12,4 @@ context.data.exit_health.outbounds[0].last_try=995;context.data.exit_health.chec
 context.data.exit_health.checked=999;context.data.exit_health.error='unavailable';assert.equal(status(),'unknown');
 assert.equal(vm.runInContext("exitStatus('missing').state",context),'unknown');
 console.log('UI syntax and VPN up/down/stale/missing-data checks passed');
+require('./check-lan-ui.cjs');

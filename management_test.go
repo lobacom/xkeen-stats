@@ -105,7 +105,7 @@ func TestLANSelectionPreservesDirectRulesAndExternalClients(t *testing.T) {
 	cfg := fixtureConfig(t)
 	original := cloneObject(cfg)
 	mc := fixtureManagement()
-	for _, exit := range []string{"exit-b", "exit-a", "exit-b"} {
+	for _, exit := range []string{"exit-b", "direct", "exit-a", "direct", "exit-b"} {
 		if err := switchLAN(cfg, mc, exit); err != nil {
 			t.Fatal(err)
 		}
@@ -140,6 +140,103 @@ func TestLANSelectionPreservesDirectRulesAndExternalClients(t *testing.T) {
 	after, _ := json.Marshal(cfg)
 	if !bytes.Equal(b, after) {
 		t.Fatal("failed LAN switch mutated config")
+	}
+}
+
+func TestDisableLANVPNPreservesBlocksAndOtherInputs(t *testing.T) {
+	cfg := fixtureConfig(t)
+	mc := fixtureManagement()
+	rules := array(object(cfg["routing"])["rules"])
+	extra := []any{jsonObject{"inboundTag": []any{"local-tcp", "region-a"}, "domain": []any{"example.test"}, "outboundTag": "exit-b"}, jsonObject{"domain": []any{"other.test"}, "outboundTag": "exit-b"}, jsonObject{"domain": []any{"ads.test"}, "outboundTag": "blocked"}}
+	object(cfg["routing"])["rules"] = append(extra, rules...)
+	original := cloneObject(cfg)
+	if err := switchLAN(cfg, mc, "direct"); err != nil {
+		t.Fatal(err)
+	}
+	kept := []any{}
+	overrides := 0
+	for _, v := range array(object(cfg["routing"])["rules"]) {
+		r := object(v)
+		if managedLANRule(mc, str(r["ruleTag"])) {
+			overrides++
+			if str(r["outboundTag"]) != "direct" || containsJSONStrings(array(r["inboundTag"]), "region-a") {
+				t.Fatal("disable rule affects VPN clients")
+			}
+		} else {
+			kept = append(kept, v)
+		}
+	}
+	if overrides != 4 || !reflect.DeepEqual(kept, object(original["routing"])["rules"]) || !reflect.DeepEqual(cfg["inbounds"], original["inbounds"]) || !reflect.DeepEqual(cfg["outbounds"], original["outbounds"]) {
+		t.Fatal("disabling LAN changed unrelated configuration")
+	}
+	if err := switchLAN(cfg, mc, "exit-b"); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range array(object(cfg["routing"])["rules"]) {
+		r := object(v)
+		if managedLANRule(mc, str(r["ruleTag"])) && str(r["outboundTag"]) != "exit-b" {
+			t.Fatal("direct override survived re-enabling")
+		}
+	}
+}
+
+func TestLANOffRequiresUnambiguousUnchainedFreedom(t *testing.T) {
+	cfg := fixtureConfig(t)
+	mc := fixtureManagement()
+	if lanDirectOutbound(cfg, mc) != "direct" {
+		t.Fatal("direct output not detected")
+	}
+	cfg["outbounds"] = append(array(cfg["outbounds"]), jsonObject{"tag": "direct2", "protocol": "freedom"})
+	if lanDirectOutbound(cfg, mc) != "" {
+		t.Fatal("ambiguous direct output guessed")
+	}
+	mc.LAN.DirectOutbound = "direct2"
+	if lanDirectOutbound(cfg, mc) != "direct2" {
+		t.Fatal("explicit output ignored")
+	}
+	configuredTags(cfg, "outbounds")["direct2"]["proxySettings"] = jsonObject{"tag": "exit-a"}
+	if lanDirectOutbound(cfg, mc) != "" || switchLAN(cfg, mc, "direct2") == nil {
+		t.Fatal("proxy chain presented as VPN off")
+	}
+}
+
+// Явно переданная локальная копия позволяет проверить режим direct самим Xray на роутере.
+func TestLocalLANOffCandidate(t *testing.T) {
+	dir := os.Getenv("XKEEN_STATS_LOCAL_FIXTURE")
+	if dir == "" {
+		t.Skip("local fixture not requested")
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "active.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg jsonObject
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	b, err = os.ReadFile(filepath.Join(dir, "management.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mc managementConfig
+	if err := json.Unmarshal(b, &mc); err != nil {
+		t.Fatal(err)
+	}
+	original := cloneObject(cfg)
+	direct := lanDirectOutbound(cfg, mc)
+	if direct == "" {
+		t.Fatal("no unambiguous direct output")
+	}
+	if err := switchLAN(cfg, mc, direct); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range original {
+		if key != "routing" && !reflect.DeepEqual(value, cfg[key]) {
+			t.Fatalf("unrelated %s changed", key)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "off-candidate.json"), mustEncode(cfg), 0600); err != nil {
+		t.Fatal(err)
 	}
 }
 

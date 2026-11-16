@@ -91,6 +91,7 @@ type managementConfig struct {
 		Inbounds       []string `json:"inbounds"`
 		Outbounds      []string `json:"outbounds"`
 		BaseOutbound   string   `json:"base_outbound"`
+		DirectOutbound string   `json:"direct_outbound,omitempty"`
 		LegacyRuleTags []string `json:"legacy_rule_tags"`
 		RuleTags       []string `json:"managed_rule_tags"`
 	} `json:"lan"`
@@ -106,8 +107,9 @@ type managedClient struct {
 	Inputs []string `json:"inbounds"`
 }
 type managedOutput struct {
-	Tag   string `json:"tag"`
-	Title string `json:"title"`
+	Tag    string `json:"tag"`
+	Title  string `json:"title"`
+	Direct bool   `json:"direct"`
 }
 type managementSnapshot struct {
 	Enabled          bool            `json:"enabled"`
@@ -213,17 +215,21 @@ func (a *App) managementSnapshot(mc managementConfig, cfg jsonObject, b []byte) 
 		s.Clients = append(s.Clients, managedClient{name, tags})
 	}
 	sort.Slice(s.Clients, func(i, j int) bool { return s.Clients[i].Name < s.Clients[j].Name })
+	directTag := lanDirectOutbound(cfg, mc)
 	for _, v := range array(cfg["outbounds"]) {
 		o := object(v)
 		tag := str(o["tag"])
-		if !contains(mc.LAN.Outbounds, tag) {
+		if !contains(mc.LAN.Outbounds, tag) || tag == directTag {
 			continue
 		}
 		title := labels["outbound:"+tag].Title
 		if title == "" {
 			title = tag
 		}
-		s.Outputs = append(s.Outputs, managedOutput{tag, title})
+		s.Outputs = append(s.Outputs, managedOutput{Tag: tag, Title: title})
+	}
+	if directTag != "" {
+		s.Outputs = append(s.Outputs, managedOutput{Tag: directTag, Title: "Без VPN — напрямую", Direct: true})
 	}
 	s.LANEnabled = len(mc.LAN.Inbounds) > 0 && len(s.Outputs) > 0 && mc.LAN.BaseOutbound != ""
 	for _, v := range array(object(cfg["routing"])["rules"]) {
@@ -327,7 +333,10 @@ func changeClient(cfg jsonObject, original, name string, inputs []string, remove
 }
 
 func switchLAN(cfg jsonObject, mc managementConfig, selected string) error {
-	if !contains(mc.LAN.Outbounds, selected) || configuredTags(cfg, "outbounds")[selected] == nil {
+	direct := lanDirectOutbound(cfg, mc)
+	directMode := direct != "" && selected == direct
+	outs := configuredTags(cfg, "outbounds")
+	if (!contains(mc.LAN.Outbounds, selected) && !directMode) || outs[selected] == nil {
 		return errors.New("Недопустимый выход LAN")
 	}
 	in := configuredTags(cfg, "inbounds")
@@ -352,14 +361,19 @@ func switchLAN(cfg jsonObject, mc managementConfig, selected string) error {
 			continue
 		}
 		global := len(array(r["inboundTag"])) == 0 && r["inboundTag"] == nil
-		if global && str(r["outboundTag"]) == mc.LAN.BaseOutbound {
-			copy := cloneObject(r)
-			tags := []any{}
-			for _, tag := range mc.LAN.Inbounds {
+		baseRule := global && str(r["outboundTag"]) == mc.LAN.BaseOutbound
+		vpnRule := isVPNExit(outs[str(r["outboundTag"])]) || str(r["balancerTag"]) != ""
+		tags := []any{}
+		for _, tag := range mc.LAN.Inbounds {
+			if global || containsJSONStrings(array(r["inboundTag"]), tag) {
 				tags = append(tags, tag)
 			}
+		}
+		if baseRule || (directMode && vpnRule && len(tags) > 0) {
+			copy := cloneObject(r)
 			copy["inboundTag"] = tags
 			copy["outboundTag"] = selected
+			delete(copy, "balancerTag")
 			copy["ruleTag"] = fmt.Sprintf("xkeen-stats-lan-%d", matched)
 			if matched < len(mc.LAN.RuleTags) {
 				copy["ruleTag"] = mc.LAN.RuleTags[matched]
@@ -377,6 +391,40 @@ func switchLAN(cfg jsonObject, mc managementConfig, selected string) error {
 	}
 	routing["rules"] = rules
 	return nil
+}
+
+func containsJSONStrings(values []any, want string) bool {
+	for _, v := range values {
+		if str(v) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func plainDirectOutbound(o jsonObject) bool {
+	return str(o["protocol"]) == "freedom" && str(object(o["proxySettings"])["tag"]) == "" && str(object(object(o["streamSettings"])["sockopt"])["dialerProxy"]) == "" && str(object(o["settings"])["redirect"]) == ""
+}
+
+// При нескольких прямых выходах выбор задаётся владельцем, без угадывания маршрута.
+func lanDirectOutbound(cfg jsonObject, mc managementConfig) string {
+	outs := configuredTags(cfg, "outbounds")
+	if mc.LAN.DirectOutbound != "" {
+		if plainDirectOutbound(outs[mc.LAN.DirectOutbound]) {
+			return mc.LAN.DirectOutbound
+		}
+		return ""
+	}
+	found := ""
+	for tag, o := range outs {
+		if plainDirectOutbound(o) {
+			if found != "" {
+				return ""
+			}
+			found = tag
+		}
+	}
+	return found
 }
 
 func managedLANRule(mc managementConfig, tag string) bool {
