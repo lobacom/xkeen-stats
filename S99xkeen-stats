@@ -12,7 +12,7 @@ umask 077
 case "$1" in
   start|restart|reconfigure)
     /opt/etc/ndm/netfilter.d/051-xkeen-stats-lan.sh || exit 1
-    /opt/bin/jq -e '.auth.enabled == true and (.auth.password_hash | type == "string" and length > 20)' /opt/etc/xkeen/xkeen-ui.json >/dev/null 2>&1 || exit 1
+    /opt/sbin/xkeen-stats -check-auth >/dev/null 2>&1 || exit 1
     ;;
 esac
 . /opt/etc/init.d/rc.func

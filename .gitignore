@@ -15,6 +15,7 @@ keenetic.txt
 *.pem
 *.key
 state*.json
+auth*.json
 *.log
 
 # Локальные бинарники.

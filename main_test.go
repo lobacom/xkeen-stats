@@ -2,8 +2,6 @@ package main
 
 import (
 	"encoding/binary"
-	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -84,32 +82,5 @@ func TestAccumulationRestartAndPersistence(t *testing.T) {
 	put(10, "boot:2")
 	if a.state.Entries["user:test"].Total.Down != 410 {
 		t.Fatal("counter reset lost traffic")
-	}
-}
-
-func TestAuthenticationFailsClosed(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "auth.json")
-	a := &App{authPath: path}
-	req := httptest.NewRequest("GET", "http://192.168.1.1:1001/api/stats", nil)
-	req.Header.Set("Cookie", "session_id=test-session")
-	if a.authorized(req) {
-		t.Fatal("missing settings accepted")
-	}
-	write := func(content string) {
-		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write(`{"auth":{"enabled":true,"password_hash":"1234567890123456789012345","session_ids":["test-session:1"]}}`)
-	if a.authorized(req) {
-		t.Fatal("expired session accepted")
-	}
-	write(`{"auth":{"enabled":true,"password_hash":"1234567890123456789012345","session_ids":["test-session:9999999999"]}}`)
-	if !a.authorized(req) {
-		t.Fatal("valid session rejected")
-	}
-	write(`{"auth":{"enabled":false,"password_hash":"1234567890123456789012345","session_ids":["test-session"]}}`)
-	if a.authorized(req) {
-		t.Fatal("disabled authentication accepted")
 	}
 }

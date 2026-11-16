@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/subtle"
 	_ "embed"
 	"encoding/binary"
 	"encoding/json"
@@ -17,7 +16,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -76,7 +74,9 @@ type App struct {
 	saveError                                           string
 	configPath, authPath, statePath, apiAddress, listen string
 	rpc                                                 *http.Client
-	web                                                 *http.Client
+	authMu                                              sync.Mutex
+	loginGate                                           chan struct{}
+	failures                                            map[string]loginFailure
 }
 
 // Минимальный protobuf-декодер читает только документированные поля StatsService.
@@ -437,36 +437,6 @@ func (a *App) load() error {
 	return nil
 }
 
-func (a *App) authorized(r *http.Request) bool {
-	cookie, err := r.Cookie("session_id")
-	if err != nil || len(cookie.Value) > 100 {
-		return false
-	}
-	var config struct {
-		Auth struct {
-			Enabled  bool     `json:"enabled"`
-			Hash     string   `json:"password_hash"`
-			Sessions []string `json:"session_ids"`
-		} `json:"auth"`
-	}
-	b, err := os.ReadFile(a.authPath)
-	if err != nil || json.Unmarshal(b, &config) != nil || !config.Auth.Enabled || len(config.Auth.Hash) < 20 {
-		return false
-	}
-	for _, stored := range config.Auth.Sessions {
-		id, expiry, hasExpiry := strings.Cut(stored, ":")
-		if subtle.ConstantTimeCompare([]byte(id), []byte(cookie.Value)) != 1 {
-			continue
-		}
-		if !hasExpiry {
-			return true
-		}
-		end, err := strconv.ParseInt(expiry, 10, 64)
-		return err == nil && end > time.Now().Unix()
-	}
-	return false
-}
-
 func (a *App) rows() ([]Row, error) {
 	var config struct {
 		Inbounds []struct {
@@ -551,6 +521,10 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		a.login(w, r)
 		return
 	}
+	if r.URL.Path == "/auth/logout" {
+		a.logout(w, r)
+		return
+	}
 	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", 405)
 		return
@@ -567,7 +541,7 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if !a.authorized(r) {
 		w.WriteHeader(401)
-		_, _ = w.Write([]byte(`{"error":"Требуется вход в XKeen UI"}`))
+		_, _ = w.Write([]byte(`{"error":"Требуется вход в статистику"}`))
 		return
 	}
 	a.mu.Lock()
@@ -580,43 +554,29 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"rows": rows, "since": a.state.Since, "updated": a.lastOK, "saved": a.state.Saved, "error": a.lastError, "save_error": a.saveError, "now": time.Now().Unix(), "interval": 5})
 }
 
-func (a *App) login(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" || r.Header.Get("Origin") != "http://"+a.listen {
-		http.Error(w, "Forbidden", 403)
-		return
-	}
-	var input struct {
-		Password string `json:"password"`
-	}
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input) != nil || input.Password == "" {
-		http.Error(w, "Invalid request", 400)
-		return
-	}
-	body, _ := json.Marshal(map[string]any{"password": input.Password, "remember": false})
-	res, err := a.web.Post("http://127.0.0.1:1000/api/auth/login", "application/json", bytes.NewReader(body))
-	if err != nil {
-		http.Error(w, "XKeen UI unavailable", 503)
-		return
-	}
-	defer res.Body.Close()
-	for _, c := range res.Cookies() {
-		if c.Name == "session_id" {
-			http.SetCookie(w, c)
-		}
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(res.StatusCode)
-	_, _ = io.Copy(w, io.LimitReader(res.Body, 8192))
-}
-
 func main() {
-	a := &App{live: map[string]Live{}, web: &http.Client{Timeout: 5 * time.Second}}
+	a := &App{live: map[string]Live{}, loginGate: make(chan struct{}, 1), failures: map[string]loginFailure{}}
 	flag.StringVar(&a.listen, "listen", "192.168.1.1:1001", "LAN address")
 	flag.StringVar(&a.configPath, "config", "/opt/etc/xray/configs/00_cascade.json", "Xray configuration")
-	flag.StringVar(&a.authPath, "auth", "/opt/etc/xkeen/xkeen-ui.json", "XKeen UI sessions")
+	flag.StringVar(&a.authPath, "auth", "/opt/etc/xkeen-stats/auth.json", "Private password hash and sessions")
 	flag.StringVar(&a.statePath, "state", "/opt/var/lib/xkeen-stats/state.json", "Statistics state")
 	flag.StringVar(&a.apiAddress, "api", "127.0.0.1:10085", "Xray StatsService")
+	setPassword := flag.Bool("set-password", false, "Read a new password from stdin; run with the service stopped")
+	checkAuth := flag.Bool("check-auth", false, "Validate the private authentication file and exit")
 	flag.Parse()
+	if *setPassword {
+		if err := setPasswordFromInput(a.authPath, os.Stdin); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("Password saved; all statistics sessions revoked")
+		return
+	}
+	if _, err := readAuth(a.authPath); err != nil {
+		log.Fatalf("Authentication unavailable: %v; initialize with -set-password", err)
+	}
+	if *checkAuth {
+		return
+	}
 	p := new(http.Protocols)
 	p.SetUnencryptedHTTP2(true)
 	a.rpc = &http.Client{Timeout: 4 * time.Second, Transport: &http.Transport{Protocols: p}}
@@ -640,7 +600,7 @@ func main() {
 			}
 		}
 	}()
-	server := &http.Server{Addr: a.listen, Handler: http.HandlerFunc(a.handle), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
+	server := &http.Server{Addr: a.listen, Handler: http.HandlerFunc(a.handle), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
 	go func() {
 		<-stop
 		if err := a.save(); err != nil {
