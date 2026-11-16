@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +21,7 @@ type exitStatus struct {
 	LastSeen  int64  `json:"last_seen"`
 	LastTry   int64  `json:"last_try"`
 	Supported bool   `json:"supported"`
+	Scope     string `json:"scope,omitempty"`
 }
 
 type exitHealth struct {
@@ -79,7 +84,7 @@ func exitTCPAddress(tag string, outs map[string]jsonObject, seen map[string]bool
 }
 
 func probeTCPExit(tag, address string) exitStatus {
-	s := exitStatus{Tag: tag, Supported: address != ""}
+	s := exitStatus{Tag: tag, Supported: address != "", Scope: tcpExitScope(address)}
 	if !s.Supported {
 		return s
 	}
@@ -95,6 +100,46 @@ func probeTCPExit(tag, address string) exitStatus {
 		s.LastSeen = s.LastTry
 	}
 	return s
+}
+
+func tcpExitScope(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return ""
+	}
+	ip := net.ParseIP(host)
+	if (ip != nil && (ip.IsLoopback() || ip.IsUnspecified())) || strings.TrimSuffix(strings.ToLower(host), ".") == "localhost" || strings.HasSuffix(strings.TrimSuffix(strings.ToLower(host), "."), ".localhost") {
+		return "local"
+	}
+	return "server"
+}
+
+func readExitProbeTargets(authPath string) (map[string]string, error) {
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(authPath), "probes.json"))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > 65536 {
+		return nil, errors.New("probe settings too large")
+	}
+	var targets map[string]string
+	if err := json.Unmarshal(b, &targets); err != nil {
+		return nil, err
+	}
+	if len(targets) > 64 {
+		return nil, errors.New("too many probe targets")
+	}
+	for tag, address := range targets {
+		host, port, e := net.SplitHostPort(address)
+		n, _ := strconv.Atoi(port)
+		if e != nil || host == "" || n < 1 || n > 65535 || tag == "" || strings.ContainsAny(host, "\r\n\t ") {
+			return nil, errors.New("invalid TCP probe target")
+		}
+	}
+	return targets, nil
 }
 
 func parseExitStatuses(data []byte) (map[string]exitStatus, error) {
@@ -164,6 +209,12 @@ func (a *App) collectExitHealth() {
 	}
 	obs := object(c["observatory"])
 	if obs == nil {
+		targets, err := readExitProbeTargets(a.authPath)
+		if err != nil {
+			h.Enabled = true
+			h.Error = "Не удалось прочитать настройки проверки серверов"
+			return
+		}
 		a.mu.Lock()
 		previous := map[string]int64{}
 		for _, s := range a.exitHealth.Outbounds {
@@ -183,8 +234,11 @@ func (a *App) collectExitHealth() {
 		deadline := time.Now().Add(15 * time.Second)
 		for _, tag := range tags {
 			address := exitTCPAddress(tag, outs, map[string]bool{})
+			if target := targets[tag]; target != "" {
+				address = target
+			}
 			if time.Now().After(deadline) {
-				h.Outbounds = append(h.Outbounds, exitStatus{Tag: tag, Supported: address != ""})
+				h.Outbounds = append(h.Outbounds, exitStatus{Tag: tag, Supported: address != "", Scope: tcpExitScope(address)})
 				continue
 			}
 			s := probeTCPExit(tag, address)

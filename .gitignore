@@ -19,6 +19,7 @@ auth*.json
 setup-token
 labels.json
 management.json
+probes.json
 setup*.json
 *.log
 

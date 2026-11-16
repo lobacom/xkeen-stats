@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/binary"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -58,5 +60,29 @@ func TestTCPExitProbeAndChainedEndpoint(t *testing.T) {
 	s = probeTCPExit("unsupported", "")
 	if s.Alive || s.Supported || s.LastTry != 0 {
 		t.Fatal("unsupported endpoint marked down")
+	}
+}
+
+func TestProbeTargetOverridesAndLocalRelayScope(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:18443", "[::1]:18444", "localhost:443"} {
+		if tcpExitScope(address) != "local" {
+			t.Fatal("local relay presented as external", address)
+		}
+	}
+	if tcpExitScope("[2001:db8::1]:443") != "server" {
+		t.Fatal("IPv6 server not recognized")
+	}
+	dir := t.TempDir()
+	auth := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(filepath.Join(dir, "probes.json"), []byte(`{"vpn":"[2001:db8::1]:443"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := readExitProbeTargets(auth)
+	if err != nil || targets["vpn"] != "[2001:db8::1]:443" {
+		t.Fatal(targets, err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "probes.json"), []byte(`{"vpn":"bad:99999"}`), 0600)
+	if _, err := readExitProbeTargets(auth); err == nil {
+		t.Fatal("invalid target accepted")
 	}
 }
