@@ -17,3 +17,4 @@ require('./check-lan-ui.cjs');
 require('./check-fallback-ui.cjs');
 require('./check-bypass-ui.cjs');
 require('./check-client-exits-ui.cjs');
+require('./check-table-scroll-ui.cjs');
