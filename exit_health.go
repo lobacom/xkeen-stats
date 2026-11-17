@@ -201,7 +201,13 @@ func (a *App) sampleExitHealth() {
 
 func (a *App) collectExitHealth() {
 	h := exitHealth{StaleAfter: 360, Outbounds: []exitStatus{}, Mode: "tcp"}
-	defer func() { a.mu.Lock(); a.exitHealth = h; a.healthWorking = false; a.mu.Unlock() }()
+	defer func() {
+		a.mu.Lock()
+		a.exitHealth = h
+		a.healthWorking = false
+		a.mu.Unlock()
+		a.evaluateFallback(time.Now())
+	}()
 	c, _, err := readXrayObjects(a.configPath)
 	if err != nil {
 		h.Error = "Не удалось прочитать настройки проверки выходов"

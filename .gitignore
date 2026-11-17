@@ -20,6 +20,7 @@ setup-token
 labels.json
 management.json
 probes.json
+lan-fallback.json
 setup*.json
 *.log
 

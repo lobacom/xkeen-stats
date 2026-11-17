@@ -1,6 +1,6 @@
 (()=>{
 const el=id=>document.getElementById(id),root=el('vpn-management'),escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let snapshot=null,changing=false,loading=false,authEpoch=0,profileClient='',profileURI='',profileFilename='vpn-profile',profileGeneration=0;
+let snapshot=null,changing=false,loading=false,authEpoch=0,profileClient='',profileURI='',profileFilename='vpn-profile',profileGeneration=0,fallbackDirty=false,fallbackOptions='';
 const title=tag=>snapshot?.inbounds.find(i=>i.tag===tag)?.title||tag;
 function message(text,bad=false){el('vpn-message').textContent=text;el('vpn-message').classList.toggle('error',bad)}
 async function request(path,body){const response=await fetch(path,{cache:'no-store',...(body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})});let data;try{data=await response.json()}catch{throw Error('Нет ответа от сервиса. Обновите список перед повторным изменением')}if(response.status===401){document.dispatchEvent(new Event('vpn-auth-lost'));throw Error('Выполните вход заново')}if(!response.ok)throw Error(data.error||'Не удалось выполнить действие');return data}
@@ -19,6 +19,17 @@ el('vpn-current').textContent=selected?(selected.direct?'Сейчас: без VP
 el('vpn-unavailable').classList.toggle('hidden',enabled);el('vpn-switch-note').classList.toggle('hidden',!canSwitch);
 const cards=outputs.map(o=>lanCard(o,active,canSwitch)).join('');if(cardsMarkup!==cards){el('exit-health-items').innerHTML=cards;cardsMarkup=cards}
 el('exit-health-note').textContent=health?.error||(!health?.enabled?'Проверка доступности серверов ещё не настроена.':health.mode==='tcp'?'TCP-доступность серверов проверяется раз в 2 минуты. Доступный сервер не гарантирует работу всего VPN-туннеля.':'Показаны результаты настроенной проверки VPN-выходов.');
+renderFallback();
+}
+function renderFallback(){
+const available=!!snapshot?.lan_enabled;el('vpn-fallback-form').classList.toggle('hidden',!available);if(!available)return;
+const f=snapshot.fallback||{enabled:false,outbound:'',after_minutes:10},rt=f.runtime||{},options='<option value="">Выберите резервный выход</option>'+snapshot.outbounds.map(o=>'<option value="'+escape(o.tag)+'">'+escape(o.title)+'</option>').join('');
+if(options!==fallbackOptions){el('vpn-fallback-outbound').innerHTML=options;fallbackOptions=options;fallbackDirty=false}
+if(!fallbackDirty){el('vpn-fallback-outbound').value=f.outbound||'';el('vpn-fallback-minutes').value=f.after_minutes||10;el('vpn-fallback-enabled').checked=!!f.enabled}
+el('vpn-fallback-save').disabled=changing||!fallbackDirty;el('vpn-fallback-switch').disabled=changing||fallbackDirty||!f.outbound||snapshot.lan_exit===f.outbound;
+const name=snapshot.outbounds.find(o=>o.tag===f.outbound)?.title||f.outbound;
+el('vpn-fallback-status').textContent=f.error||rt.error||(fallbackDirty?'Есть несохранённые изменения.':f.outbound===snapshot.lan_exit?'Резерв уже используется. Выбрать другой выход можно на карточке выше.':rt.last_switch?'Автоматический переход на резерв: '+healthTime(rt.last_switch)+'.':f.enabled?(rt.down_since?'Текущий выход недоступен с '+healthTime(rt.down_since)+'. Переход на «'+name+'» после '+f.after_minutes+' мин, если резерв доступен.':'Автопереход на «'+name+'» после '+f.after_minutes+' мин недоступности.'):f.outbound?'Автопереход выключен. Резерв доступен по кнопке.':'Выберите резервный выход и сохраните настройки.');
+el('vpn-fallback-status').classList.toggle('error',!!(f.error||rt.error));
 }
 function render(){renderLAN()}
 async function load(){if(changing||loading)return;loading=true;const epoch=authEpoch;el('vpn-refresh').disabled=true;try{const next=await request('/api/manage');if(epoch!==authEpoch)return;snapshot=next;render();message('');document.dispatchEvent(new Event('vpn-management-ready'))}catch(e){message(e.message,true)}finally{loading=false;el('vpn-refresh').disabled=false}}
@@ -38,12 +49,15 @@ el('vpn-profile-copy').onclick=async()=>{try{if(navigator.clipboard?.writeText)a
 el('vpn-profile-download').onclick=()=>{const url=URL.createObjectURL(new Blob([profileURI+'\n'],{type:'text/plain;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=profileFilename+'.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
 el('exit-health-items').addEventListener('click',async e=>{const button=e.target.closest('button[data-vpn-exit]');if(!button||changing||!snapshot?.lan_enabled)return;const output=snapshot.outbounds.find(o=>o.tag===button.dataset.vpnExit);if(!output||snapshot.lan_exit===output.tag)return;try{await apply('/api/manage/lan',{outbound:output.tag});message(output.direct?'VPN для домашней сети отключён. Используется прямое подключение.':'Выход домашней сети изменён: '+output.title)}catch{}});
 el('vpn-add-client').onclick=()=>edit();el('vpn-refresh').onclick=load;
+for(const id of ['vpn-fallback-outbound','vpn-fallback-minutes','vpn-fallback-enabled'])el(id).addEventListener('input',()=>{fallbackDirty=true;renderFallback()});
+el('vpn-fallback-form').addEventListener('submit',async e=>{e.preventDefault();const after=Number(el('vpn-fallback-minutes').value),outbound=el('vpn-fallback-outbound').value,enabled=el('vpn-fallback-enabled').checked;if(!Number.isInteger(after)||after<1||after>1440||enabled&&!outbound){message('Выберите резерв и задержку от 1 до 1440 минут',true);return}try{await apply('/api/manage/fallback',{fallback_revision:snapshot.fallback?.revision,enabled,outbound,after_minutes:after});fallbackDirty=false;renderFallback();message('Настройки резерва сохранены')}catch{}});
+el('vpn-fallback-switch').onclick=async()=>{if(changing||fallbackDirty||!snapshot?.fallback?.outbound)return;try{await apply('/api/manage/fallback/switch',{fallback_revision:snapshot.fallback.revision});message('Домашняя сеть переведена на резервный выход')}catch{}};
 document.querySelectorAll('.vpn-dialog').forEach(d=>d.addEventListener('cancel',e=>{if(changing)e.preventDefault()}));
 window.vpnManagement={get enabled(){return !!snapshot?.enabled},get selectedExit(){return snapshot?.lan_enabled?snapshot.lan_exit:''},canEdit:name=>!!snapshot?.clients?.some(c=>c.name===name)};
-document.addEventListener('vpn-exit-health',e=>{health=e.detail.health;healthStatus=e.detail.status;healthTime=e.detail.formatTime;renderLAN()});
+document.addEventListener('vpn-exit-health',e=>{health=e.detail.health;healthStatus=e.detail.status;healthTime=e.detail.formatTime;const rt=e.detail.fallbackRuntime;if(rt&&snapshot?.fallback){snapshot.fallback.runtime=rt;if(rt.current&&rt.current!==snapshot.lan_exit)load()}renderLAN()});
 
 document.addEventListener('vpn-auth-ready',()=>{if(!snapshot)load()});
 if(!el('dashboard').classList.contains('hidden'))load();
 document.querySelectorAll('[data-vpn-close]').forEach(b=>b.onclick=()=>{if(!changing)el(b.dataset.vpnClose).close()});
-document.addEventListener('vpn-auth-lost',()=>{authEpoch++;snapshot=null;clearProfile();profileClient='';cardsMarkup='';health=null;el('exit-health-items').replaceChildren();el('vpn-current').textContent='';el('vpn-client-name').value='';el('vpn-original-name').value='';el('vpn-client-inputs').replaceChildren();document.querySelectorAll('.vpn-dialog[open]').forEach(d=>d.close())});
+document.addEventListener('vpn-auth-lost',()=>{authEpoch++;snapshot=null;clearProfile();profileClient='';cardsMarkup='';health=null;fallbackDirty=false;fallbackOptions='';el('vpn-fallback-form').classList.add('hidden');el('vpn-fallback-outbound').replaceChildren();el('vpn-fallback-enabled').checked=false;el('exit-health-items').replaceChildren();el('vpn-current').textContent='';el('vpn-client-name').value='';el('vpn-original-name').value='';el('vpn-client-inputs').replaceChildren();document.querySelectorAll('.vpn-dialog[open]').forEach(d=>d.close())});
 })();

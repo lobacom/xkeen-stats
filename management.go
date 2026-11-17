@@ -112,14 +112,15 @@ type managedOutput struct {
 	Direct bool   `json:"direct"`
 }
 type managementSnapshot struct {
-	Enabled          bool            `json:"enabled"`
-	Revision         string          `json:"revision"`
-	SettingsRevision string          `json:"settings_revision"`
-	Inputs           []managedInput  `json:"inbounds"`
-	Clients          []managedClient `json:"clients"`
-	Outputs          []managedOutput `json:"outbounds"`
-	LANExit          string          `json:"lan_exit"`
-	LANEnabled       bool            `json:"lan_enabled"`
+	Enabled          bool             `json:"enabled"`
+	Revision         string           `json:"revision"`
+	SettingsRevision string           `json:"settings_revision"`
+	Inputs           []managedInput   `json:"inbounds"`
+	Clients          []managedClient  `json:"clients"`
+	Outputs          []managedOutput  `json:"outbounds"`
+	LANExit          string           `json:"lan_exit"`
+	LANEnabled       bool             `json:"lan_enabled"`
+	Fallback         fallbackSnapshot `json:"fallback"`
 }
 
 func (a *App) managementDir() string { return filepath.Join(filepath.Dir(a.authPath), "management") }
@@ -241,6 +242,7 @@ func (a *App) managementSnapshot(mc managementConfig, cfg jsonObject, b []byte) 
 	if s.LANExit == "" {
 		s.LANExit = mc.LAN.BaseOutbound
 	}
+	s.Fallback = a.fallbackSnapshot()
 	return s
 }
 
@@ -458,7 +460,16 @@ func (a *App) managementCommand(mc managementConfig, args []string, logPath stri
 	}
 	defer f.Close()
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+mc.Assets)
+	// Лимиты Go относятся к панели. Передавать её 24 MiB запущенному
+	// Xray нельзя: это может вызвать постоянную сборку мусора в ядре.
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if key == "GOMEMLIMIT" || key == "GOGC" || key == "GOMAXPROCS" || key == "XRAY_LOCATION_ASSET" {
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	cmd.Env = append(cmd.Env, "XRAY_LOCATION_ASSET="+mc.Assets)
 	cmd.Stdout = f
 	cmd.Stderr = f
 	return cmd.Run()
@@ -530,11 +541,24 @@ func removeManagementPending(path string) error {
 	return nil
 }
 func (a *App) managementReady() bool {
-	for n := 0; n < 4; n++ {
-		if _, e := a.call("QueryStats"); e == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return a.waitManagementReady(ctx)
+}
+
+// XKeen подтверждает запуск процесса раньше, чем Xray загрузит геобазы и откроет API.
+func (a *App) waitManagementReady(ctx context.Context) bool {
+	for ctx.Err() == nil {
+		if _, e := a.rpcCallContext(ctx, "xray.app.stats.command.StatsService", "QueryStats"); e == nil {
 			return true
 		}
-		time.Sleep(500 * time.Millisecond)
+		timer := time.NewTimer(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
 	}
 	return false
 }
@@ -789,6 +813,9 @@ func (a *App) managementHandler(w http.ResponseWriter, r *http.Request) {
 		Inputs           []string `json:"inbounds"`
 		Inbound          string   `json:"inbound"`
 		Outbound         string   `json:"outbound"`
+		FallbackRevision string   `json:"fallback_revision"`
+		Enabled          bool     `json:"enabled"`
+		AfterMinutes     int      `json:"after_minutes"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384))
 	if dec.Decode(&in) != nil {
@@ -830,6 +857,15 @@ func (a *App) managementHandler(w http.ResponseWriter, r *http.Request) {
 		authReply(w, 409, "Конфигурация изменилась. Обновите список")
 		return
 	}
+	if r.URL.Path == "/api/manage/fallback" {
+		settings := fallbackConfig{Enabled: in.Enabled, Outbound: in.Outbound, AfterMinutes: in.AfterMinutes}
+		if err = a.saveFallback(mc, cfg, in.FallbackRevision, settings); err != nil {
+			authReply(w, 409, err.Error())
+			return
+		}
+		_ = json.NewEncoder(w).Encode(a.managementSnapshot(mc, cfg, b))
+		return
+	}
 	next := cloneObject(cfg)
 	switch r.URL.Path {
 	case "/api/manage/client":
@@ -837,6 +873,14 @@ func (a *App) managementHandler(w http.ResponseWriter, r *http.Request) {
 	case "/api/manage/client/delete":
 		err = changeClient(next, in.Name, in.Name, nil, true)
 	case "/api/manage/lan":
+		err = switchLAN(next, mc, in.Outbound)
+	case "/api/manage/fallback/switch":
+		settings, revision, e := a.readFallback()
+		if e != nil || revision != in.FallbackRevision || settings.Outbound == "" {
+			authReply(w, 409, "Настройки резерва изменились. Обновите список")
+			return
+		}
+		in.Outbound = settings.Outbound
 		err = switchLAN(next, mc, in.Outbound)
 	default:
 		http.NotFound(w, r)
@@ -849,6 +893,9 @@ func (a *App) managementHandler(w http.ResponseWriter, r *http.Request) {
 	if err = a.commitManagedConfig(mc, in.Revision, b, next); err != nil {
 		authReply(w, 409, err.Error())
 		return
+	}
+	if r.URL.Path == "/api/manage/lan" || r.URL.Path == "/api/manage/fallback/switch" {
+		a.resetFallback()
 	}
 	_ = json.NewEncoder(w).Encode(a.managementSnapshot(mc, next, mustEncode(next)))
 }

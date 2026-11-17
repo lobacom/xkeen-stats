@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"os/exec"
 	"strconv"
+	"time"
 )
 
 func applyFirewall(c serviceConfig) error {
@@ -26,7 +28,11 @@ func applyFirewall(c serviceConfig) error {
 		return err
 	}
 	run := func(args ...string) error {
-		if out, e := exec.Command(iptab, args...).CombinedOutput(); e != nil {
+		// На Keenetic правила параллельно обновляет NDMS. Старый iptables
+		// поддерживает только -w без числа секунд; предел задаём контекстом.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if out, e := exec.CommandContext(ctx, iptab, append([]string{"-w"}, args...)...).CombinedOutput(); e != nil {
 			return fmt.Errorf("iptables %v: %s", args, out)
 		}
 		return nil

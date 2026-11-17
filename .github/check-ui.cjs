@@ -13,3 +13,4 @@ context.data.exit_health.checked=999;context.data.exit_health.error='unavailable
 assert.equal(vm.runInContext("exitStatus('missing').state",context),'unknown');
 console.log('UI syntax and VPN up/down/stale/missing-data checks passed');
 require('./check-lan-ui.cjs');
+require('./check-fallback-ui.cjs');

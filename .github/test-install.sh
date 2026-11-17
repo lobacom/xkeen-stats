@@ -27,6 +27,8 @@ ip address add 10.222.0.1/24 dev xkstest
 ip link set xkstest up
 cat >/opt/bin/iptables <<'EOF'
 #!/bin/sh
+[ "${1:-}" = -w ] || exit 3
+shift
 case "$1" in -C|-nL) exit 1;; esac
 case " $* " in *' REJECT '*) case " $* " in *' -p tcp '*) ;; *) exit 2;; esac;; esac
 exit 0

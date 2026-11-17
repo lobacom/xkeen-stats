@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/binary"
 	"encoding/json"
@@ -85,6 +86,7 @@ type App struct {
 	exitHealth                                          exitHealth
 	lastHealthAttempt                                   time.Time
 	healthWorking                                       bool
+	fallbackRuntime                                     fallbackRuntime
 	rpc                                                 *http.Client
 	authMu                                              sync.Mutex
 	loginGate                                           chan struct{}
@@ -152,7 +154,11 @@ func (a *App) call(method string) ([]byte, error) {
 }
 
 func (a *App) rpcCall(service, method string) ([]byte, error) {
-	req, err := http.NewRequest("POST", "http://"+a.apiAddress+"/"+service+"/"+method, bytes.NewReader(make([]byte, 5)))
+	return a.rpcCallContext(context.Background(), service, method)
+}
+
+func (a *App) rpcCallContext(ctx context.Context, service, method string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", "http://"+a.apiAddress+"/"+service+"/"+method, bytes.NewReader(make([]byte, 5)))
 	if err != nil {
 		return nil, err
 	}
@@ -586,7 +592,7 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Не удалось прочитать список профилей"}`, 503)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"rows": rows, "since": a.state.Since, "updated": a.lastOK, "saved": a.state.Saved, "error": a.lastError, "save_error": a.saveError, "labels_error": a.labelsError, "now": time.Now().Unix(), "interval": 5, "exit_health": a.exitHealth})
+	_ = json.NewEncoder(w).Encode(map[string]any{"rows": rows, "since": a.state.Since, "updated": a.lastOK, "saved": a.state.Saved, "error": a.lastError, "save_error": a.saveError, "labels_error": a.labelsError, "now": time.Now().Unix(), "interval": 5, "exit_health": a.exitHealth, "fallback_runtime": a.fallbackRuntime})
 }
 
 func main() {
@@ -729,7 +735,7 @@ func main() {
 			}
 		}
 	}()
-	server := &http.Server{Addr: a.listen, Handler: http.HandlerFunc(a.handle), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 120 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
+	server := &http.Server{Addr: a.listen, Handler: http.HandlerFunc(a.handle), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 180 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
 	go func() {
 		<-stop
 		if err := a.save(); err != nil {

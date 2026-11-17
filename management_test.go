@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 const managementFixture = `{
@@ -518,5 +521,64 @@ func TestManagementValidationRollbackAndRecovery(t *testing.T) {
 				t.Fatal("invalid config restarted Xray")
 			}
 		})
+	}
+}
+
+func TestManagementWaitsForSlowXrayAPI(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts <= 5 {
+			http.Error(w, "starting", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Grpc-Status", "0")
+		_, _ = w.Write(make([]byte, 5))
+	}))
+	defer server.Close()
+	a := &App{rpc: server.Client(), apiAddress: strings.TrimPrefix(server.URL, "http://")}
+	if !a.managementReady() || attempts != 6 {
+		t.Fatal("slow startup was treated as a failed configuration", attempts)
+	}
+}
+
+func TestManagementReadinessHonorsDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	a := &App{rpc: server.Client(), apiAddress: strings.TrimPrefix(server.URL, "http://")}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if a.waitManagementReady(ctx) || time.Since(start) > time.Second {
+		t.Fatal("readiness probe ignored its deadline")
+	}
+}
+
+func TestManagementCommandDoesNotPassPanelRuntimeLimits(t *testing.T) {
+	if os.Getenv("XKEEN_TEST_MANAGEMENT_CHILD") == "1" {
+		for _, key := range []string{"GOMEMLIMIT", "GOGC", "GOMAXPROCS"} {
+			if os.Getenv(key) != "" {
+				os.Exit(19)
+			}
+		}
+		if os.Getenv("XRAY_LOCATION_ASSET") != os.Getenv("XKEEN_TEST_EXPECTED_ASSET") {
+			os.Exit(20)
+		}
+		return
+	}
+	t.Setenv("XKEEN_TEST_MANAGEMENT_CHILD", "1")
+	t.Setenv("GOMEMLIMIT", "24MiB")
+	t.Setenv("GOGC", "25")
+	t.Setenv("GOMAXPROCS", "1")
+	t.Setenv("XRAY_LOCATION_ASSET", "previous-assets")
+	assets := t.TempDir()
+	t.Setenv("XKEEN_TEST_EXPECTED_ASSET", assets)
+	a := &App{}
+	err := a.managementCommand(managementConfig{Assets: assets}, []string{os.Args[0], "-test.run=^TestManagementCommandDoesNotPassPanelRuntimeLimits$"}, filepath.Join(t.TempDir(), "child.log"))
+	if err != nil {
+		t.Fatal("Xray helper inherited the panel's Go limits or wrong assets", err)
 	}
 }
