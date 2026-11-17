@@ -21,6 +21,7 @@ labels.json
 management.json
 probes.json
 lan-fallback.json
+bypass.json
 setup*.json
 *.log
 

@@ -112,15 +112,16 @@ type managedOutput struct {
 	Direct bool   `json:"direct"`
 }
 type managementSnapshot struct {
-	Enabled          bool             `json:"enabled"`
-	Revision         string           `json:"revision"`
-	SettingsRevision string           `json:"settings_revision"`
-	Inputs           []managedInput   `json:"inbounds"`
-	Clients          []managedClient  `json:"clients"`
-	Outputs          []managedOutput  `json:"outbounds"`
-	LANExit          string           `json:"lan_exit"`
-	LANEnabled       bool             `json:"lan_enabled"`
-	Fallback         fallbackSnapshot `json:"fallback"`
+	Enabled          bool                `json:"enabled"`
+	Revision         string              `json:"revision"`
+	SettingsRevision string              `json:"settings_revision"`
+	Inputs           []managedInput      `json:"inbounds"`
+	ClientExits      []managedClientExit `json:"client_exits"`
+	Clients          []managedClient     `json:"clients"`
+	Outputs          []managedOutput     `json:"outbounds"`
+	LANExit          string              `json:"lan_exit"`
+	LANEnabled       bool                `json:"lan_enabled"`
+	Fallback         fallbackSnapshot    `json:"fallback"`
 }
 
 func (a *App) managementDir() string { return filepath.Join(filepath.Dir(a.authPath), "management") }
@@ -243,6 +244,7 @@ func (a *App) managementSnapshot(mc managementConfig, cfg jsonObject, b []byte) 
 		s.LANExit = mc.LAN.BaseOutbound
 	}
 	s.Fallback = a.fallbackSnapshot()
+	s.ClientExits = clientExitChoices(cfg, s.Outputs, s.Inputs)
 	return s
 }
 

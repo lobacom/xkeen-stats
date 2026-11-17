@@ -29,6 +29,9 @@ var page []byte
 //go:embed management.js
 var managementScript []byte
 
+//go:embed bypass.js
+var bypassScript []byte
+
 type Traffic struct {
 	Up   int64 `json:"up"`
 	Down int64 `json:"down"`
@@ -94,6 +97,10 @@ type App struct {
 	allowSetup                                          bool
 	setupTokenPath                                      string
 	updater                                             *updater
+	bypassApply                                         func(bypassConfig, string) error
+	bypassRun                                           func(context.Context, string, []string, []byte) ([]byte, error)
+	bypassHook                                          string
+	bypassInterface                                     string
 }
 
 // Минимальный protobuf-декодер читает только документированные поля StatsService.
@@ -546,6 +553,10 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		a.managementHandler(w, r)
 		return
 	}
+	if r.URL.Path == "/api/bypass" || r.URL.Path == "/api/bypass/devices" {
+		a.bypassHandler(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/update") {
 		a.updateHandler(w, r)
 		return
@@ -575,6 +586,11 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(managementScript)
 		return
 	}
+	if r.URL.Path == "/bypass.js" {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		_, _ = w.Write(bypassScript)
+		return
+	}
 	if r.URL.Path != "/api/stats" {
 		http.NotFound(w, r)
 		return
@@ -598,6 +614,7 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 func main() {
 	cfg, cfgErr := readServiceConfig()
 	a := &App{live: map[string]Live{}, loginGate: make(chan struct{}, 1), failures: map[string]loginFailure{}}
+	a.bypassInterface = cfg.Interface
 	flag.StringVar(&a.listen, "listen", cfg.Listen, "LAN address")
 	flag.StringVar(&a.lanCIDR, "lan", cfg.LAN, "Allowed LAN subnet")
 	flag.StringVar(&a.configPath, "config", cfg.Config, "Xray configuration file or directory")
@@ -613,6 +630,7 @@ func main() {
 	installSource := flag.String("source-config", "", "Generator source JSON; must match active configuration")
 	installAllowRestart := flag.Bool("allow-xray-restart", false, "Allow the one-time Xray restart if statistics need enabling")
 	firewall := flag.Bool("firewall", false, "Apply the LAN-only firewall rules from service.json")
+	bypassFirewall := flag.Bool("bypass-firewall", false, "Restore managed LAN bypass rules without restarting Xray")
 	setPassword := flag.Bool("set-password", false, "Read a new password from stdin; run with the service stopped")
 	checkAuth := flag.Bool("check-auth", false, "Validate the private authentication file and exit")
 	prepareAuth := flag.Bool("prepare-auth", false, "Prepare first-run access and print its private setup link")
@@ -642,6 +660,12 @@ func main() {
 	}
 	if *firewall {
 		if err := applyFirewall(cfg); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *bypassFirewall {
+		if err := a.restoreBypass(); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -709,6 +733,9 @@ func main() {
 		log.Fatal(err)
 	}
 	if *checkInstall {
+		if _, _, err := a.readBypass(); err != nil {
+			log.Fatal(err)
+		}
 		if _, err := a.rows(); err != nil {
 			log.Fatal(err)
 		}
@@ -716,6 +743,9 @@ func main() {
 	}
 	if err := a.recoverManagement(); err != nil {
 		log.Fatalf("VPN management recovery failed: %v", err)
+	}
+	if err := a.restoreBypass(); err != nil {
+		log.Printf("LAN bypass restoration failed: %v", err)
 	}
 	a.updater = &updater{app: a, dir: *updateDir, client: newUpdateClient()}
 	stop := make(chan os.Signal, 1)

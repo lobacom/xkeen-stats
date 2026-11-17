@@ -2,6 +2,7 @@ const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/st
 const html=fs.readFileSync('index.html','utf8');
 for(const match of html.matchAll(/<script>([\s\S]*?)<\/script>/g))new vm.Script(match[1]);
 new vm.Script(fs.readFileSync('management.js','utf8'));
+new vm.Script(fs.readFileSync('bypass.js','utf8'));
 const fn=html.match(/function exitStatus\(tag\)\{[^\n]+/)[0];
 const context={data:{now:1000,exit_health:{enabled:true,checked:999,stale_after:180,outbounds:[{tag:'test',alive:true,delay_ms:100,last_try:995,last_seen:995}]}}};vm.createContext(context);vm.runInContext(fn,context);
 const status=()=>vm.runInContext("exitStatus('test').state",context);
@@ -14,3 +15,5 @@ assert.equal(vm.runInContext("exitStatus('missing').state",context),'unknown');
 console.log('UI syntax and VPN up/down/stale/missing-data checks passed');
 require('./check-lan-ui.cjs');
 require('./check-fallback-ui.cjs');
+require('./check-bypass-ui.cjs');
+require('./check-client-exits-ui.cjs');
