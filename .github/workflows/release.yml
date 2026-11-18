@@ -34,6 +34,7 @@ jobs:
           release_commit=$(git rev-parse HEAD)
           go test ./...
           go vet ./...
+          python3 -B -m unittest discover -s tools
           node .github/check-ui.cjs
           sudo --preserve-env=PATH,GITHUB_ACTIONS bash .github/test-install.sh
           mkdir -p dist

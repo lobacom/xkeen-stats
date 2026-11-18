@@ -17,5 +17,6 @@ jobs:
           cache: false
       - run: go test ./...
       - run: go vet ./...
+      - run: python3 -B -m unittest discover -s tools
       - run: node .github/check-ui.cjs
       - run: sudo --preserve-env=PATH,GITHUB_ACTIONS bash .github/test-install.sh

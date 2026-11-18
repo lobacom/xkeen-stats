@@ -43,7 +43,8 @@ const beforeTemplates=posts();
 for(const template of state.templates){
  node('bypass-template').value=template.id;node('bypass-template').listeners.change();
  assert.equal(node('bypass-name').value,template.name);assert.equal(node('bypass-network').value,template.network);assert.equal(node('bypass-ports').value,template.ports);
- assert.equal(node('bypass-addresses').value,template.destinations.join('\n'));assert.equal(node('bypass-scope').value,template.scope);assert.match(node('bypass-template-info').textContent,/17.11.2026/);
+ const [year,month,day]=template.updated.split('-');
+ assert.equal(node('bypass-addresses').value,template.destinations.join('\n'));assert.equal(node('bypass-scope').value,template.scope);assert.ok(node('bypass-template-info').textContent.includes(`${day}.${month}.${year}`));
 }
 assert.equal(posts(),beforeTemplates,'choosing templates sent mutation requests');
 assert.equal(node('bypass-scope').value,'devices','Steam must request users own adapters');

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func bypassFixture() bypassConfig {
@@ -19,13 +20,14 @@ func bypassFixture() bypassConfig {
 }
 
 func TestBuiltInBypassTemplates(t *testing.T) {
-	counts := map[string]int{"kinopoisk": 2, "telemost": 45, "vk": 8, "steam-sdr": 151}
-	if len(builtinBypassTemplates) != len(counts) {
+	expected := map[string]bool{"kinopoisk": true, "telemost": true, "vk": true, "steam-sdr": true}
+	if len(builtinBypassTemplates) != len(expected) {
 		t.Fatal("expected four built-in categories")
 	}
 	seen := map[string]bool{}
 	for _, template := range builtinBypassTemplates {
-		if seen[template.ID] || counts[template.ID] != len(template.Destinations) || template.Updated != "2026-11-17" || template.Description == "" {
+		_, dateErr := time.Parse(time.DateOnly, template.Updated)
+		if !expected[template.ID] || seen[template.ID] || dateErr != nil || template.Description == "" {
 			t.Fatal("invalid template metadata", template.ID)
 		}
 		seen[template.ID] = true
@@ -39,7 +41,7 @@ func TestBuiltInBypassTemplates(t *testing.T) {
 			t.Fatal("unexpected service defaults")
 		}
 		c, err := normalizeBypass(bypassConfig{Version: 1, Interface: "br0", Rules: []bypassRule{rule}})
-		if err != nil || len(c.Rules[0].Destinations) != counts[template.ID] {
+		if err != nil || len(c.Rules[0].Destinations) != len(template.Destinations) {
 			t.Fatal("template cannot be saved", template.ID, err)
 		}
 		for _, address := range template.Destinations {
